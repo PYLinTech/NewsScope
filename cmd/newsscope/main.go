@@ -40,7 +40,7 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer store.DB.Close()
+	defer store.Close()
 	model := analyzer.New(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.Categories, cfg.MaxBodyChars, cfg.MaxDuplicateDiffChars, cfg.MaxSummaryChars, cfg.TimeoutSec)
 	api := server.New(store, cfg, logger, model)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

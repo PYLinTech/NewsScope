@@ -80,7 +80,7 @@
     .panel-title { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
     .panel-description { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .panel-body { padding: 18px 19px; }
-    .config-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
+    .config-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .38fr) auto; align-items: end; gap: 12px; }
     .form-grid { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(260px, 1.65fr) minmax(150px, .65fr); gap: 13px; }
     .field { display: grid; align-content: start; gap: 6px; min-width: 0; }
     .field-label { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
@@ -200,7 +200,7 @@
 
     <section id="targetSettings" class="panel service-settings" aria-labelledby="serviceTitle" hidden>
       <div class="panel-header">
-        <div><h2 id="serviceTitle" class="panel-title">采集服务配置</h2><p class="panel-description">设置 NewsScope 接收采集结果的服务地址。</p></div>
+        <div><h2 id="serviceTitle" class="panel-title">采集服务配置</h2><p class="panel-description">设置 NewsScope 接收地址和逐行扫描间隔；每个间隔只轮到一个订阅。</p></div>
       </div>
       <div class="panel-body">
         <form id="targetForm" class="config-form">
@@ -208,7 +208,11 @@
             <span class="field-label">NewsScope 服务地址</span>
             <input id="newsscopeUrl" class="control" type="url" inputmode="url" required autocomplete="url" placeholder="http://127.0.0.1:8886">
           </label>
-          <button class="button button-primary" type="submit"><i class="ri-save-line" aria-hidden="true"></i>保存地址</button>
+          <label class="field" for="pollInterval">
+            <span class="field-label">逐行扫描间隔 <span class="field-hint">秒 · 至少 10 秒，每次轮到一个订阅</span></span>
+            <input id="pollInterval" class="control" type="number" inputmode="numeric" min="10" step="1" required>
+          </label>
+          <button class="button button-primary" type="submit"><i class="ri-save-line" aria-hidden="true"></i>保存设置</button>
         </form>
         <p id="targetMessage" class="inline-message" role="status" aria-live="polite"></p>
       </div>
@@ -273,7 +277,7 @@
       <div id="subscriptionList" role="list" aria-live="polite"></div>
     </section>
 
-    <p class="privacy-note"><i class="ri-shield-check-line" aria-hidden="true"></i><span>插件管理界面仅供本机访问。适配器会并发轮询订阅，并优先按来源标识或文章链接去重；缺少稳定标识时使用标题和发布时间。采集时间记录为实际抓取时刻。</span></p>
+    <p class="privacy-note"><i class="ri-shield-check-line" aria-hidden="true"></i><span>插件管理界面仅供本机访问。适配器按配置的逐行扫描间隔轮换检查订阅；响应较慢时会受并发上限约束。资讯优先按来源标识或文章链接去重，缺少稳定标识时使用标题和发布时间。采集时间记录为实际抓取时刻。</span></p>
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden><i class="ri-checkbox-circle-line" aria-hidden="true"></i><span id="toastText"></span></div>
@@ -434,6 +438,8 @@
       latestState = state;
       const targetInput = $('#newsscopeUrl');
       if (!targetInput.dataset.dirty) targetInput.value = state.newsscope_url;
+      const intervalInput = $('#pollInterval');
+      if (!intervalInput.dataset.dirty) intervalInput.value = String(state.poll_interval);
       updateOverview(state.subscriptions);
       $('#subscriptionCount').textContent = `${state.subscriptions.length} 个订阅 · 状态每 15 秒更新`;
       renderSubscriptions(state.subscriptions);
@@ -483,6 +489,9 @@
         if (latestState && !$('#newsscopeUrl').dataset.dirty) {
           $('#newsscopeUrl').value = latestState.newsscope_url;
         }
+        if (latestState && !$('#pollInterval').dataset.dirty) {
+          $('#pollInterval').value = String(latestState.poll_interval);
+        }
         $('#newsscopeUrl').focus({ preventScroll: true });
       } else if (settings.contains(document.activeElement)) {
         button.focus({ preventScroll: true });
@@ -493,7 +502,7 @@
       form.reset();
       $('#subscriptionId').value = sub?.id == null ? '' : String(sub.id);
       $('#subscriptionName').value = sub?.name || '';
-      $('#subscriptionUrl').value = sub?.url || '';
+      $('#subscriptionUrl').value = sub ? (sub.url || '') : 'http://127.0.0.1:1200/';
       $('#subscriptionAudience').value = sub?.audience || 'normal';
       $('#formTitle').textContent = sub ? '修改订阅' : '添加订阅';
       setMessage($('#subscriptionMessage'), '');
@@ -531,18 +540,34 @@
       event.preventDefault();
       const button = event.currentTarget.querySelector('button[type="submit"]');
       button.disabled = true;
-      const newsscopeURL = $('#newsscopeUrl').value;
+      const urlInput = $('#newsscopeUrl');
+      const newsscopeURL = urlInput.value;
+      const pollInterval = Number($('#pollInterval').value);
+      const payload = { poll_interval: pollInterval };
+      if (urlInput.dataset.dirty) payload.newsscope_url = newsscopeURL;
       try {
-        await api('/api/config', { method: 'POST', body: JSON.stringify({ newsscope_url: newsscopeURL }) });
-        $('#newsscopeUrl').dataset.dirty = '';
-        $('#newsscopeUrl').value = newsscopeURL;
-        if (latestState) latestState.newsscope_url = newsscopeURL;
-        notify('NewsScope 服务地址已保存。');
+        const saved = await api('/api/config', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        urlInput.dataset.dirty = '';
+        urlInput.value = saved.newsscope_url;
+        $('#pollInterval').dataset.dirty = '';
+        $('#pollInterval').value = String(saved.poll_interval);
+        if (latestState) {
+          latestState.newsscope_url = saved.newsscope_url;
+          latestState.poll_interval = saved.poll_interval;
+        }
+        notify('采集服务地址和逐行扫描间隔已保存。');
         setTargetSettingsOpen(false);
       } catch (error) { setMessage($('#targetMessage'), error.message, 'error'); }
       finally { button.disabled = false; }
     });
     $('#newsscopeUrl').addEventListener('input', (event) => {
+      event.currentTarget.dataset.dirty = 'true';
+      setMessage($('#targetMessage'), '');
+    });
+    $('#pollInterval').addEventListener('input', (event) => {
       event.currentTarget.dataset.dirty = 'true';
       setMessage($('#targetMessage'), '');
     });

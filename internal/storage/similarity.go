@@ -27,9 +27,9 @@ type SimilarCandidate struct {
 }
 
 // FindSimilarCandidates compares the supplied raw title and body with raw
-// content received in the same audience during the previous 24 hours. It only
-// narrows candidates; the caller must ask the model before classifying a hit
-// as a duplicate.
+// content received in the same audience during the previous 24 hours. The
+// caller may treat exact 100% matches as duplicates; other candidates require
+// model review.
 func (s *Store) FindSimilarCandidates(ctx context.Context, in ArticleInput, audience string) ([]SimilarCandidate, error) {
 	cutoff := time.Now().Unix() - similarityWindowSeconds
 	// The incoming article is shared across every comparison. Build its shingle

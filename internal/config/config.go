@@ -47,7 +47,7 @@ func Load() (Config, error) {
 		DatabasePath:          env("DATABASE_PATH", "./data/newsscope.db"),
 		Workers:               intEnv("ANALYSIS_WORKERS", 3),
 		MaxAttempts:           intEnv("ANALYSIS_MAX_ATTEMPTS", 5),
-		TimeoutSec:            intEnv("ANALYSIS_TIMEOUT_SECONDS", 45),
+		TimeoutSec:            intEnv("ANALYSIS_TIMEOUT_SECONDS", 600),
 		MaxBodyChars:          intEnv("ANALYSIS_MAX_BODY_CHARS", 300000),
 		MaxDuplicateDiffChars: intEnv("ANALYSIS_MAX_DUPLICATE_DIFF_CHARS", 30000),
 		MaxSummaryChars:       intEnv("ANALYSIS_MAX_SUMMARY_CHARS", 120),
@@ -64,7 +64,7 @@ func Load() (Config, error) {
 	if c.MaxQueryCount < 1 || c.MaxQueryCount > 10000 {
 		return c, fmt.Errorf("MAX_QUERY_COUNT must be between 1 and 10000")
 	}
-	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.TimeoutSec > 600 || c.MaxDuplicateDiffChars < 1 || c.MaxSummaryChars < 1 || c.MaxSummaryChars > 2000 {
+	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.MaxDuplicateDiffChars < 1 || c.MaxSummaryChars < 1 || c.MaxSummaryChars > 2000 {
 		return c, fmt.Errorf("analysis worker, retry, timeout, duplicate diff or summary limit configuration is invalid")
 	}
 	for name, addr := range map[string]string{"NORMAL_ADDR": c.NormalAddr, "VIP_ADDR": c.VIPAddr} {

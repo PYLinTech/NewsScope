@@ -33,7 +33,7 @@ Collectors ──► Ingest API ──► SQLite ingest queue ──► 8 ingest
 | Collector | `127.0.0.1:8886` | `POST /ingest/normal`, `POST /ingest/vip` |
 | Normal query | `127.0.0.1:8887` | `GET /`, `GET /news`, `GET /news/range`, `GET /news/{id}` |
 | VIP query | `127.0.0.1:8888` | Same query endpoints as normal |
-| Admin | `127.0.0.1:8889` | `POST /hide` |
+| Admin | `127.0.0.1:8889` | `POST /hide`, `GET /analysis/failed`, `POST /analysis/retry` |
 
 The query listeners can be bound to other interfaces through configuration. The collector and admin listeners always bind to loopback. Protect externally exposed query listeners with your network controls or reverse proxy.
 
@@ -83,7 +83,7 @@ To package official RSSHub, NewsScope, and the RSSHub adapter plugin into one Do
 | `DATABASE_PATH` | `./data/newsscope.db` | SQLite database file path. |
 | `ANALYSIS_WORKERS` | `3` | Number of background analysis workers. |
 | `ANALYSIS_MAX_ATTEMPTS` | `5` | Maximum analysis attempts before a job is left failed. |
-| `ANALYSIS_TIMEOUT_SECONDS` | `45` | Timeout for one model analysis request. |
+| `ANALYSIS_TIMEOUT_SECONDS` | `600` | Timeout for one model request, including analysis and duplicate review. |
 | `ANALYSIS_MAX_BODY_CHARS` | `300000` | Maximum body characters passed to the analysis model. The stored article body remains the submitted content. |
 | `ANALYSIS_MAX_DUPLICATE_DIFF_CHARS` | `30000` | Maximum candidate-only diff characters sent for each article during duplicate review. |
 | `ANALYSIS_MAX_SUMMARY_CHARS` | `120` | Maximum summary characters. Bodies at or below this length are used verbatim; longer bodies are summarized and capped at this length. |
@@ -255,11 +255,32 @@ Success response:
 
 Hiding updates the article status and hidden time; it does not delete the record. The article is omitted from list and detail results in the relevant audience, while position maxima remain unchanged. Repeating the operation returns `already_hidden`. An unknown ID returns HTTP 400 with `{"error":"invalid_request"}`.
 
+### List failed analysis jobs — `GET /analysis/failed`
+
+```http
+GET /analysis/failed?limit=50&before_id=8123
+```
+
+`limit` is optional, defaults to 50, and must be between 1 and 100. `before_id` is an optional cursor; pass the previous response's `next_before_id` to fetch older records. Results are ordered by descending article ID and include the title, source, audience, attempt count, last error, and update time, but not the article body.
+
+### Retry analysis jobs — `POST /analysis/retry`
+
+Submit up to 100 article IDs at a time. Only jobs that are still `failed` are requeued; retrying resets their attempt count and clears the previous error. Other IDs are returned in `skipped_ids`. Workers start processing requeued jobs automatically.
+
+```http
+POST /analysis/retry
+Content-Type: application/json
+
+{"article_ids":[8123,8124]}
+```
+
+The success response includes `retried_ids`, `skipped_ids`, and their counts. The admin API has no token authentication and binds to loopback only; do not expose its port to external networks.
+
 ## Analysis and duplicate handling
 
 After an article is accepted, a background worker asks the configured model to select one configured category, produce 2–6 keywords, write a Chinese summary capped by `ANALYSIS_MAX_SUMMARY_CHARS`, and assign an integer importance rating from 1 (lowest) to 5 (highest). Bodies at or below the summary limit are used verbatim; longer bodies are summarized and capped at that limit. Importance is based on supported impact, scope, and urgency rather than dramatic wording. Article bodies are stored as submitted; only `ANALYSIS_MAX_BODY_CHARS` is sent to the analysis model.
 
-For duplicate detection, NewsScope compares each incoming article's title and body with candidate articles collected during the previous 24 hours in the same audience. Fuzzy similarity weights the title at 30% and body at 70%. The model then reviews similar candidates and confirms whether they describe the same specific event. Only model-confirmed duplicates are discarded. Normal and VIP data are not compared with each other.
+For duplicate detection, NewsScope compares each incoming article's title and body with candidate articles collected during the previous 24 hours in the same audience. Fuzzy similarity weights the title at 30% and body at 70%. An exact 100% match is treated as a duplicate without model review; the model reviews all other similar candidates to confirm whether they describe the same specific event. Normal and VIP data are not compared with each other.
 
 ## Development
 

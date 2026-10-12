@@ -25,7 +25,7 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.error import HTTPError
@@ -38,7 +38,7 @@ import xml.etree.ElementTree as ET
 DEFAULT_PANEL_HOST = "127.0.0.1"
 DEFAULT_PANEL_PORT = 8885
 DEFAULT_NEWSCOPE_URL = "http://127.0.0.1:8886"
-DEFAULT_INTERVAL = 60
+DEFAULT_INTERVAL = 10
 DEFAULT_WORKERS = 4
 REQUEST_TIMEOUT_SECONDS = 25
 MAX_FEED_BYTES = 12 * 1024 * 1024
@@ -370,8 +370,9 @@ def extract_feed(xml_bytes: bytes) -> tuple[str, list[dict[str, str]]]:
 
 
 class ConfigStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, default_poll_interval: int = DEFAULT_INTERVAL) -> None:
         self.path = path
+        self.default_poll_interval = default_poll_interval
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.target_lock = ReadWriteLock()
@@ -388,9 +389,13 @@ class ConfigStore:
             raise
         self.data = self._load()
 
-    @staticmethod
-    def _default() -> dict:
-        return {"newsscope_url": DEFAULT_NEWSCOPE_URL, "subscriptions": []}
+    def _default(self) -> dict:
+        return {
+            "newsscope_url": DEFAULT_NEWSCOPE_URL,
+            "poll_interval": self.default_poll_interval,
+            "subscriptions": [],
+        }
+
     def _load(self) -> dict:
         if not self.path.exists():
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,6 +413,10 @@ class ConfigStore:
             raise RuntimeError(f"配置文件结构无效：{self.path}")
         data["subscriptions"] = subscriptions
         try:
+            poll_interval = data.get("poll_interval", self.default_poll_interval)
+            if type(poll_interval) is not int or poll_interval < 10:
+                raise ValueError("逐行扫描间隔必须是至少 10 秒的整数")
+            data["poll_interval"] = poll_interval
             data["newsscope_url"] = validate_http_url(
                 str(data.get("newsscope_url", DEFAULT_NEWSCOPE_URL)), allow_path=False
             )
@@ -456,12 +465,41 @@ class ConfigStore:
                 and self.data.get("newsscope_url") == newsscope_url
             )
 
-    def save_url(self, raw: str) -> None:
-        value = validate_http_url(raw, allow_path=False)
-        with self.target_lock.write():
+    def save_settings(self, values: dict) -> dict:
+        newsscope_url = None
+        poll_interval = None
+        if "newsscope_url" in values:
+            newsscope_url = validate_http_url(str(values["newsscope_url"]), allow_path=False)
+        if "poll_interval" in values:
+            poll_interval = values["poll_interval"]
+            if type(poll_interval) is not int or poll_interval < 10:
+                raise ValueError("逐行扫描间隔必须是至少 10 秒的整数")
+        if newsscope_url is None and poll_interval is None:
+            raise ValueError("没有可保存的配置")
+
+        target_guard = self.target_lock.write() if newsscope_url is not None else nullcontext()
+        with target_guard:
             with self.lock:
-                self.data["newsscope_url"] = value
-                self._write(self.data)
+                previous_url = self.data["newsscope_url"]
+                previous_interval = self.data["poll_interval"]
+                if newsscope_url is not None:
+                    self.data["newsscope_url"] = newsscope_url
+                if poll_interval is not None:
+                    self.data["poll_interval"] = poll_interval
+                try:
+                    self._write(self.data)
+                except OSError:
+                    self.data["newsscope_url"] = previous_url
+                    self.data["poll_interval"] = previous_interval
+                    raise
+                return {
+                    "newsscope_url": self.data["newsscope_url"],
+                    "poll_interval": self.data["poll_interval"],
+                }
+
+    def poll_interval(self) -> int:
+        with self.lock:
+            return self.data["poll_interval"]
 
     def save_subscription(self, values: dict) -> dict:
         name = str(values.get("name", "")).strip()[:200]
@@ -694,42 +732,64 @@ def poll_subscription(sub: dict, newscope_url: str, config: Optional[ConfigStore
 
 
 class Poller(threading.Thread):
-    def __init__(self, config: ConfigStore, status: RuntimeStatus, interval: int, workers: int) -> None:
+    def __init__(self, config: ConfigStore, status: RuntimeStatus, workers: int) -> None:
         super().__init__(name="rsshub-poller", daemon=True)
         self.config = config
         self.status = status
-        self.interval = interval
         self.workers = workers
         self.stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self.stop_event.is_set():
-            started = time.monotonic()
-            snapshot = self.config.snapshot()
-            subscriptions = snapshot.get("subscriptions", [])
-            if subscriptions:
-                with ThreadPoolExecutor(max_workers=min(self.workers, len(subscriptions))) as pool:
-                    futures = {
-                        pool.submit(poll_subscription, sub, snapshot["newsscope_url"], self.config): sub
-                        for sub in subscriptions
-                    }
-                    for future in as_completed(futures):
-                        sub = futures[future]
-                        try:
-                            result = future.result()
-                        except Exception as exc:
-                            result = {"id": sub["id"], "checked_at": int(time.time()), "ok": False, "error": str(exc)[:500]}
-                        if result.pop("stale", False):
-                            continue
-                        result.pop("seen_keys", None)
-                        previous = self.status.snapshot().get(sub["id"], {})
-                        if result.get("ok"):
-                            result["last_success_at"] = result["checked_at"]
-                        else:
-                            result["last_success_at"] = previous.get("last_success_at")
-                        self.status.set(sub["id"], **result)
-            wait = max(1.0, self.interval - (time.monotonic() - started))
-            self.stop_event.wait(wait)
+        in_flight = {}
+        last_subscription_id = None
+        interval = self.config.poll_interval()
+        next_dispatch = time.monotonic()
+        with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="rsshub-feed") as pool:
+            while not self.stop_event.is_set():
+                completed = [future for future in in_flight if future.done()]
+                for future in completed:
+                    sub = in_flight.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {"id": sub["id"], "checked_at": int(time.time()), "ok": False, "error": str(exc)[:500]}
+                    if result.pop("stale", False):
+                        continue
+                    result.pop("seen_keys", None)
+                    previous = self.status.snapshot().get(sub["id"], {})
+                    if result.get("ok"):
+                        result["last_success_at"] = result["checked_at"]
+                    else:
+                        result["last_success_at"] = previous.get("last_success_at")
+                    self.status.set(sub["id"], **result)
+
+                now = time.monotonic()
+                configured_interval = self.config.poll_interval()
+                if configured_interval != interval:
+                    interval = configured_interval
+                    next_dispatch = now + interval
+                if now >= next_dispatch:
+                    snapshot = self.config.snapshot()
+                    subscriptions = snapshot.get("subscriptions", [])
+                    if subscriptions and len(in_flight) < self.workers:
+                        ids = [sub["id"] for sub in subscriptions]
+                        start = (ids.index(last_subscription_id) + 1) % len(ids) if last_subscription_id in ids else 0
+                        in_flight_ids = {sub["id"] for sub in in_flight.values()}
+                        for offset in range(len(subscriptions)):
+                            sub = subscriptions[(start + offset) % len(subscriptions)]
+                            if sub["id"] in in_flight_ids:
+                                continue
+                            future = pool.submit(poll_subscription, sub, snapshot["newsscope_url"], self.config)
+                            in_flight[future] = sub
+                            last_subscription_id = sub["id"]
+                            break
+                    next_dispatch = now + interval
+
+                delay = max(0.0, next_dispatch - time.monotonic())
+                if in_flight:
+                    wait(in_flight, timeout=min(delay, 0.5), return_when=FIRST_COMPLETED)
+                else:
+                    self.stop_event.wait(min(delay, 0.5))
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -817,6 +877,7 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
                     subscriptions.append(row)
                 self._json(200, {
                     "newsscope_url": snapshot["newsscope_url"],
+                    "poll_interval": snapshot["poll_interval"],
                     "subscriptions": subscriptions,
                 })
                 return
@@ -851,8 +912,8 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
             try:
                 payload = self._read_json()
                 if self.path == "/api/config":
-                    config.save_url(str(payload.get("newsscope_url", "")))
-                    self._json(200, {"ok": True})
+                    saved = config.save_settings(payload)
+                    self._json(200, {"ok": True, **saved})
                 elif self.path == "/api/subscriptions":
                     saved = config.save_subscription(payload)
                     self._json(200, {"ok": True, "subscription": saved})
@@ -890,7 +951,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="RSSHub adapter for NewsScope")
     parser.add_argument("--host", default=os.environ.get("RSSHUB_PANEL_HOST", DEFAULT_PANEL_HOST), help="监听地址；容器模式支持 0.0.0.0")
     parser.add_argument("--port", type=int, default=int(os.environ.get("RSSHUB_PANEL_PORT", DEFAULT_PANEL_PORT)), help="适配插件端口，默认 8885")
-    parser.add_argument("--interval", type=int, default=int(os.environ.get("RSSHUB_POLL_INTERVAL", DEFAULT_INTERVAL)), help="RSS 轮询间隔秒数，默认 60")
+    parser.add_argument("--interval", type=int, default=int(os.environ.get("RSSHUB_POLL_INTERVAL", DEFAULT_INTERVAL)), help="启动下一个订阅检查的间隔秒数，默认 10")
     parser.add_argument("--workers", type=int, default=int(os.environ.get("RSSHUB_POLL_WORKERS", DEFAULT_WORKERS)), help="并发订阅数，默认 4")
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("RSSHUB_CONFIG", default_config_path())), help="配置文件路径")
     args = parser.parse_args()
@@ -902,12 +963,12 @@ def main() -> int:
         parser.error("端口、轮询间隔或并发数超出有效范围")
 
     try:
-        config = ConfigStore(args.config.expanduser())
+        config = ConfigStore(args.config.expanduser(), args.interval)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 2
     status = RuntimeStatus()
-    poller = Poller(config, status, args.interval, args.workers)
+    poller = Poller(config, status, args.workers)
     server = ThreadingHTTPServer((host, args.port), make_handler(config, status, Path(__file__).with_name("index.html")))
     server.daemon_threads = True
     poller.start()

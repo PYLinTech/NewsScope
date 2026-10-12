@@ -20,6 +20,7 @@ import (
 
 type Store struct {
 	DB         *sql.DB
+	QueryDB    *sql.DB
 	writeMu    sync.Mutex
 	jobWake    chan struct{}
 	ingestWake chan struct{}
@@ -27,6 +28,8 @@ type Store struct {
 }
 
 const jobWakeBuffer = 64
+
+const queryConnectionCount = 8
 
 const (
 	AudienceNormal = "normal"
@@ -121,18 +124,40 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(maxConnections)
 	db.SetMaxIdleConns(maxConnections)
-	s := &Store{DB: db, jobWake: make(chan struct{}, jobWakeBuffer), ingestWake: make(chan struct{}, jobWakeBuffer), wal: path != ":memory:"}
+	s := &Store{DB: db, QueryDB: db, jobWake: make(chan struct{}, jobWakeBuffer), ingestWake: make(chan struct{}, jobWakeBuffer), wal: path != ":memory:"}
+	if path != ":memory:" {
+		queryDB, openErr := sql.Open("sqlite", dsn)
+		if openErr != nil {
+			db.Close()
+			return nil, openErr
+		}
+		queryDB.SetMaxOpenConns(queryConnectionCount)
+		queryDB.SetMaxIdleConns(queryConnectionCount)
+		s.QueryDB = queryDB
+	}
 	if err := s.initSchema(); err != nil {
-		db.Close()
+		s.Close()
 		return nil, err
 	}
 	if path != ":memory:" {
 		if _, err := db.Exec("PRAGMA optimize=0x10002"); err != nil {
-			db.Close()
+			s.Close()
 			return nil, fmt.Errorf("optimize SQLite query planner: %w", err)
 		}
 	}
 	return s, nil
+}
+
+// Close releases both the worker/writer pool and the isolated query pool.
+func (s *Store) Close() error {
+	var queryErr error
+	if s.QueryDB != nil && s.QueryDB != s.DB {
+		queryErr = s.QueryDB.Close()
+	}
+	if s.DB != nil {
+		return errors.Join(queryErr, s.DB.Close())
+	}
+	return queryErr
 }
 
 // Maintain refreshes planner statistics and passively checkpoints the WAL.
@@ -201,6 +226,19 @@ CREATE TABLE IF NOT EXISTS analyses (
  model TEXT NOT NULL, prompt_version TEXT NOT NULL, created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_analyses_category ON analyses(category, article_id);
+CREATE TABLE IF NOT EXISTS audience_counts (
+ audience TEXT PRIMARY KEY,
+ article_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS category_counts (
+ audience TEXT NOT NULL,
+ category TEXT NOT NULL,
+ article_count INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(audience,category)
+);
+CREATE TABLE IF NOT EXISTS query_stats_migrations (
+ version INTEGER PRIMARY KEY
+);
 `
 	for _, statement := range strings.Split(schema, ";") {
 		if strings.TrimSpace(statement) == "" {
@@ -210,7 +248,74 @@ CREATE INDEX IF NOT EXISTS idx_analyses_category ON analyses(category, article_i
 			return err
 		}
 	}
-	return nil
+	triggers := []string{
+		`CREATE TRIGGER IF NOT EXISTS articles_count_insert AFTER INSERT ON articles BEGIN
+			INSERT INTO audience_counts(audience,article_count) VALUES(NEW.audience,1)
+			ON CONFLICT(audience) DO UPDATE SET article_count=article_count+1;
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS articles_count_delete BEFORE DELETE ON articles BEGIN
+			UPDATE audience_counts SET article_count=article_count-1 WHERE audience=OLD.audience;
+			UPDATE category_counts SET article_count=article_count-1
+			WHERE audience=OLD.audience AND category IN (SELECT category FROM analyses WHERE article_id=OLD.id);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS analyses_count_insert AFTER INSERT ON analyses BEGIN
+			INSERT INTO category_counts(audience,category,article_count)
+			VALUES((SELECT audience FROM articles WHERE id=NEW.article_id),NEW.category,1)
+			ON CONFLICT(audience,category) DO UPDATE SET article_count=article_count+1;
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS analyses_count_category_update AFTER UPDATE OF category ON analyses
+		WHEN NEW.category<>OLD.category BEGIN
+			UPDATE category_counts SET article_count=article_count-1
+			WHERE audience=(SELECT audience FROM articles WHERE id=NEW.article_id) AND category=OLD.category;
+			INSERT INTO category_counts(audience,category,article_count)
+			VALUES((SELECT audience FROM articles WHERE id=NEW.article_id),NEW.category,1)
+			ON CONFLICT(audience,category) DO UPDATE SET article_count=article_count+1;
+		END`,
+	}
+	for _, trigger := range triggers {
+		if _, err := s.DB.Exec(trigger); err != nil {
+			return err
+		}
+	}
+	return s.initializeQueryStats()
+}
+
+// initializeQueryStats backfills counters once. Triggers keep them current in
+// the same transactions as article ingestion and analysis completion.
+func (s *Store) initializeQueryStats() error {
+	var initialized int
+	err := s.DB.QueryRow(`SELECT 1 FROM query_stats_migrations WHERE version=1`).Scan(&initialized)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM audience_counts`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM category_counts`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO audience_counts(audience,article_count) SELECT audience,COUNT(*) FROM articles GROUP BY audience`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO category_counts(audience,category,article_count)
+		SELECT a.audience,n.category,COUNT(*) FROM analyses n JOIN articles a ON a.id=n.article_id GROUP BY a.audience,n.category`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO audience_counts(audience,article_count) VALUES('normal',0),('vip',0) ON CONFLICT(audience) DO NOTHING`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO query_stats_migrations(version) VALUES(1)`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Ingest(ctx context.Context, in ArticleInput, audience string) (IngestResult, error) {
@@ -404,7 +509,7 @@ func (s *Store) signalIngest() {
 
 func (s *Store) FindExactArticle(ctx context.Context, in ArticleInput, audience string) (int64, bool, error) {
 	var id int64
-	err := s.DB.QueryRowContext(ctx, `SELECT id FROM articles WHERE audience=? AND content_hash=? LIMIT 1`, audience, articleContentHash(in)).Scan(&id)
+	err := s.QueryDB.QueryRowContext(ctx, `SELECT id FROM articles WHERE audience=? AND content_hash=? LIMIT 1`, audience, articleContentHash(in)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -448,7 +553,7 @@ func NormalizeArticle(in ArticleInput) (ArticleInput, bool) {
 // It counts every article occupying a position, including hidden and
 // unprocessed articles; List may therefore return fewer visible items.
 func (s *Store) MaxPosition(ctx context.Context, category, audience string) (int64, error) {
-	return maxPosition(ctx, s.DB, category, audience)
+	return maxPosition(ctx, s.QueryDB, category, audience)
 }
 
 type rowQueryer interface {
@@ -460,37 +565,52 @@ type rowsQueryer interface {
 }
 
 func maxPosition(ctx context.Context, db rowQueryer, category, audience string) (int64, error) {
-	query := `SELECT COUNT(*) FROM articles a WHERE a.audience=?`
+	query := `SELECT article_count FROM audience_counts WHERE audience=?`
 	args := []any{audience}
 	if category != "all" {
-		query += ` AND EXISTS (SELECT 1 FROM analyses n WHERE n.article_id=a.id AND n.category=?)`
+		query = `SELECT article_count FROM category_counts WHERE audience=? AND category=?`
 		args = append(args, category)
 	}
 	var n int64
 	err := db.QueryRowContext(ctx, query, args...).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
 	return n, err
 }
 
 func (s *Store) CategoryMaxima(ctx context.Context, categories []string, audience string) ([]CategoryMax, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT n.category,COUNT(*) FROM articles a LEFT JOIN analyses n ON n.article_id=a.id WHERE a.audience=? GROUP BY n.category`, audience)
+	tx, err := s.QueryDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer tx.Rollback()
 	counts := make(map[string]int64, len(categories)+1)
 	var all int64
+	if err := tx.QueryRowContext(ctx, `SELECT article_count FROM audience_counts WHERE audience=?`, audience).Scan(&all); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT category,article_count FROM category_counts WHERE audience=?`, audience)
+	if err != nil {
+		return nil, err
+	}
 	for rows.Next() {
-		var category sql.NullString
+		var category string
 		var count int64
 		if err := rows.Scan(&category, &count); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		all += count
-		if category.Valid {
-			counts[category.String] = count
-		}
+		counts[category] = count
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	result := make([]CategoryMax, 0, len(categories)+1)
@@ -502,14 +622,14 @@ func (s *Store) CategoryMaxima(ctx context.Context, categories []string, audienc
 }
 
 func (s *Store) List(ctx context.Context, category, audience string, start, end int64) ([]Card, error) {
-	return list(ctx, s.DB, category, audience, start, end)
+	return list(ctx, s.QueryDB, category, audience, start, end)
 }
 
 // ListPage reads the current position limit and its requested rows from the
 // same SQLite snapshot, so one response cannot mix pre-write metadata with
 // post-write page contents.
 func (s *Store) ListPage(ctx context.Context, category, audience string, start, end int64) (int64, []Card, error) {
-	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := s.QueryDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return 0, nil, err
 	}
@@ -574,22 +694,33 @@ func list(ctx context.Context, db rowsQueryer, category, audience string, start,
 func (s *Store) DateRange(ctx context.Context, category, audience string, from, to int64) ([]map[string]int64, error) {
 	// Count every database record in the category, including hidden and
 	// unprocessed articles, so the returned positions match /news ordering.
+	tx, err := s.QueryDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	base := `FROM articles a`
+	filter := `a.audience=? AND a.collected_at>=? AND a.collected_at<?`
+	insideArgs := []any{audience, from, to}
+	beforeFilter := `a.audience=? AND a.collected_at>=?`
+	beforeArgs := []any{audience, to}
 	if category != "all" {
 		base += ` JOIN analyses n ON n.article_id=a.id`
-	}
-	filter := `a.audience=?`
-	args := []any{from, to, to, audience}
-	if category != "all" {
 		filter += ` AND n.category=?`
-		args = append(args, category)
+		insideArgs = append(insideArgs, category)
+		beforeFilter += ` AND n.category=?`
+		beforeArgs = append(beforeArgs, category)
 	}
 	var before, inside int64
-	// Both counts come from one SQLite statement, so concurrent ingestion
-	// cannot make the returned range internally inconsistent.
-	q := `SELECT COALESCE(SUM(CASE WHEN a.collected_at>=? AND a.collected_at<? THEN 1 ELSE 0 END),0), ` +
-		`COALESCE(SUM(CASE WHEN a.collected_at>=? THEN 1 ELSE 0 END),0) ` + base + ` WHERE ` + filter
-	if err := s.DB.QueryRowContext(ctx, q, args...).Scan(&inside, &before); err != nil {
+	// Separate range predicates let SQLite seek through the audience/time index
+	// instead of summing over every article in the audience.
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+base+` WHERE `+filter, insideArgs...).Scan(&inside); err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+base+` WHERE `+beforeFilter, beforeArgs...).Scan(&before); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	if inside == 0 {
@@ -601,7 +732,7 @@ func (s *Store) DateRange(ctx context.Context, category, audience string, from, 
 func (s *Store) Detail(ctx context.Context, id int64, audience string) (Detail, error) {
 	var d Detail
 	var raw string
-	err := s.DB.QueryRowContext(ctx, `SELECT a.id,a.source,a.collected_at,n.category,n.importance,a.title,n.summary,n.keywords_json,a.body,COALESCE(a.original_url,'') FROM articles a JOIN analyses n ON n.article_id=a.id JOIN analysis_jobs j ON j.article_id=a.id WHERE a.id=? AND a.audience=? AND a.hidden=0 AND j.status='completed'`, id, audience).Scan(&d.ID, &d.Source, &d.CollectedAt, &d.Category, &d.Importance, &d.Title, &d.Summary, &raw, &d.Body, &d.OriginalURL)
+	err := s.QueryDB.QueryRowContext(ctx, `SELECT a.id,a.source,a.collected_at,n.category,n.importance,a.title,n.summary,n.keywords_json,a.body,COALESCE(a.original_url,'') FROM articles a JOIN analyses n ON n.article_id=a.id JOIN analysis_jobs j ON j.article_id=a.id WHERE a.id=? AND a.audience=? AND a.hidden=0 AND j.status='completed'`, id, audience).Scan(&d.ID, &d.Source, &d.CollectedAt, &d.Category, &d.Importance, &d.Title, &d.Summary, &raw, &d.Body, &d.OriginalURL)
 	if err != nil {
 		return Detail{}, err
 	}
@@ -659,6 +790,80 @@ type Job struct {
 	ArticleID           int64
 	Source, Title, Body string
 	Attempts            int
+}
+
+type FailedAnalysisJob struct {
+	ArticleID   int64  `json:"article_id"`
+	Source      string `json:"source"`
+	Title       string `json:"title"`
+	CollectedAt int64  `json:"collected_at"`
+	OriginalURL string `json:"original_url,omitempty"`
+	Audience    string `json:"audience"`
+	Attempts    int    `json:"attempts"`
+	LastError   string `json:"last_error"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+func (s *Store) ListFailedAnalysisJobs(ctx context.Context, beforeID int64, limit int) ([]FailedAnalysisJob, bool, error) {
+	rows, err := s.QueryDB.QueryContext(ctx, `SELECT j.article_id,a.source,a.title,a.collected_at,COALESCE(a.original_url,''),a.audience,j.attempts,COALESCE(j.last_error,''),j.updated_at
+		FROM analysis_jobs j JOIN articles a ON a.id=j.article_id
+		WHERE j.status='failed' AND (?<=0 OR j.article_id<?)
+		ORDER BY j.article_id DESC LIMIT ?`, beforeID, beforeID, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]FailedAnalysisJob, 0, limit+1)
+	for rows.Next() {
+		var item FailedAnalysisJob
+		if err := rows.Scan(&item.ArticleID, &item.Source, &item.Title, &item.CollectedAt, &item.OriginalURL, &item.Audience, &item.Attempts, &item.LastError, &item.UpdatedAt); err != nil {
+			return nil, false, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
+}
+
+func (s *Store) RetryFailedAnalysisJobs(ctx context.Context, articleIDs []int64) (retried, skipped []int64, err error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	retried = make([]int64, 0, len(articleIDs))
+	skipped = make([]int64, 0, len(articleIDs))
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	for _, id := range articleIDs {
+		result, err := tx.ExecContext(ctx, `UPDATE analysis_jobs SET status='pending',attempts=0,next_run_at=?,last_error=NULL,updated_at=? WHERE article_id=? AND status='failed'`, now, now, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return nil, nil, err
+		}
+		if count == 1 {
+			retried = append(retried, id)
+		} else {
+			skipped = append(skipped, id)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	if len(retried) > 0 {
+		s.signalJob()
+	}
+	return retried, skipped, nil
 }
 
 func (s *Store) Claim(ctx context.Context) (Job, bool, error) {

@@ -33,7 +33,7 @@ NewsScope 是一个用于采集、分析和查询资讯的 Go 服务。它接收
 | 采集器 | `127.0.0.1:8886` | `POST /ingest/normal`、`POST /ingest/vip` |
 | Normal 查询 | `127.0.0.1:8887` | `GET /`、`GET /news`、`GET /news/range`、`GET /news/{id}` |
 | VIP 查询 | `127.0.0.1:8888` | 与 normal 相同的查询端点 |
-| 管理 | `127.0.0.1:8889` | `POST /hide` |
+| 管理 | `127.0.0.1:8889` | `POST /hide`、`GET /analysis/failed`、`POST /analysis/retry` |
 
 查询监听器可通过配置绑定到其他网络接口。采集器和管理监听器始终绑定本机回环地址。若将查询监听器暴露到外部网络，请通过网络策略或反向代理保护访问。
 
@@ -83,7 +83,7 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 | `DATABASE_PATH` | `./data/newsscope.db` | SQLite 数据库文件路径。 |
 | `ANALYSIS_WORKERS` | `3` | 后台分析工作器数量。 |
 | `ANALYSIS_MAX_ATTEMPTS` | `5` | 分析任务被标记失败前的最大尝试次数。 |
-| `ANALYSIS_TIMEOUT_SECONDS` | `45` | 单次模型分析请求的超时时间。 |
+| `ANALYSIS_TIMEOUT_SECONDS` | `600` | 单次模型请求的超时时间，包含资讯分析和重复判断。 |
 | `ANALYSIS_MAX_BODY_CHARS` | `300000` | 发送给分析模型的正文最大字符数。数据库仍保存采集器提交的完整正文。 |
 | `ANALYSIS_MAX_DUPLICATE_DIFF_CHARS` | `30000` | 查重时每篇候选资讯最多发送的独有差异字符数。 |
 | `ANALYSIS_MAX_SUMMARY_CHARS` | `120` | 摘要最大字符数。正文不超过该值时直接将正文作为摘要；超过时由模型总结并限制在该值内。 |
@@ -255,11 +255,32 @@ Content-Type: application/json
 
 隐藏操作只更新资讯状态和隐藏时间，不删除记录。隐藏后，该资讯不再出现在对应受众的列表和详情中，但位置最大值保持不变。重复隐藏返回 `already_hidden`。ID 不存在时返回 HTTP 400 和 `{"error":"invalid_request"}`。
 
+### 查询分析失败记录 — `GET /analysis/failed`
+
+```http
+GET /analysis/failed?limit=50&before_id=8123
+```
+
+`limit` 可选，默认 50，范围为 1 至 100。`before_id` 可选，用上一页响应中的 `next_before_id` 查询更早的记录。结果按资讯 ID 倒序排列；失败记录包含资讯标题、来源、受众、失败次数、最后错误和更新时间，不包含正文。
+
+### 重试分析 — `POST /analysis/retry`
+
+每次最多提交 100 个资讯 ID。只有当前状态仍为 `failed` 的任务会重新入队；重试会重置失败次数并清除上次错误。其他 ID 会列入 `skipped_ids`。工作器会在提交成功后自动处理。
+
+```http
+POST /analysis/retry
+Content-Type: application/json
+
+{"article_ids":[8123,8124]}
+```
+
+成功响应包含 `retried_ids`、`skipped_ids` 及对应数量。该管理接口没有令牌认证，仅绑定本机回环地址，请勿将管理端口暴露到外部网络。
+
 ## 分析与重复判断
 
 资讯被接收后，后台工作器会调用配置的模型：从预置分类中选择一个分类、生成 2 至 6 个关键词、生成不超过 `ANALYSIS_MAX_SUMMARY_CHARS` 的中文摘要，并给出 1（最低）至 5（最高）的整数重要性评分。正文长度不超过摘要上限时直接作为摘要；更长的正文由模型总结并限制在上限内。评分依据正文能支持的影响范围、现实影响和紧迫程度，不因夸张措辞而提高。资讯正文按采集器提交内容存储；发送给分析模型的正文长度受 `ANALYSIS_MAX_BODY_CHARS` 限制。
 
-重复判断时，NewsScope 会将每条新资讯的标题和正文与过去 24 小时内、同一受众的候选资讯做模糊相似度比较。标题权重为 30%，正文权重为 70%。随后由模型复核候选是否描述同一具体事件。只有模型确认重复后才丢弃新资讯。Normal 与 VIP 数据之间不会交叉比对。
+重复判断时，NewsScope 会将每条新资讯的标题和正文与过去 24 小时内、同一受众的候选资讯做模糊相似度比较。标题权重为 30%，正文权重为 70%。相似度达到 100% 时直接判为重复，不再调用模型；其他相似候选由模型复核是否描述同一具体事件。Normal 与 VIP 数据之间不会交叉比对。
 
 ## 开发
 

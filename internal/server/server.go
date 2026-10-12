@@ -39,6 +39,9 @@ type ingestRequest struct {
 type hideRequest struct {
 	ID int64 `json:"id"`
 }
+type retryAnalysisRequest struct {
+	ArticleIDs []int64 `json:"article_ids"`
+}
 
 func New(st *storage.Store, c config.Config, l *log.Logger, model *analyzer.Client) *API {
 	return &API{
@@ -55,6 +58,8 @@ func (a *API) CollectorHandler() http.Handler {
 func (a *API) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hide", a.hide)
+	mux.HandleFunc("GET /analysis/failed", a.failedAnalyses)
+	mux.HandleFunc("POST /analysis/retry", a.retryAnalyses)
 	return a.recover(mux)
 }
 func (a *API) QueryHandler(audience string) http.Handler {
@@ -236,6 +241,11 @@ func (a *API) ingestArticle(ctx context.Context, article storage.ArticleInput, a
 			return storage.IngestResult{}, err
 		}
 		if len(candidates) > 0 {
+			for _, candidate := range candidates {
+				if candidate.Similarity >= 1.0 {
+					return storage.IngestResult{Status: "duplicate", ArticleID: candidate.ArticleID}, nil
+				}
+			}
 			if a.Model == nil {
 				return storage.IngestResult{}, errors.New("duplicate review model is not configured")
 			}
@@ -290,6 +300,70 @@ func (a *API) hide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "id": req.ID, "status": status, "message": "资讯已隐藏"})
+}
+
+func (a *API) failedAnalyses(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := int64(50)
+	if raw := q.Get("limit"); raw != "" {
+		parsed, ok := parseInt(raw)
+		if !ok || parsed < 1 || parsed > 100 {
+			invalid(w)
+			return
+		}
+		limit = parsed
+	}
+	var beforeID int64
+	if raw := q.Get("before_id"); raw != "" {
+		parsed, ok := parseInt(raw)
+		if !ok || parsed <= 0 {
+			invalid(w)
+			return
+		}
+		beforeID = parsed
+	}
+	items, hasMore, err := a.Store.ListFailedAnalysisJobs(r.Context(), beforeID, int(limit))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	var nextBeforeID int64
+	if hasMore && len(items) > 0 {
+		nextBeforeID = items[len(items)-1].ArticleID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "limit": limit, "next_before_id": nextBeforeID, "has_more": hasMore,
+	})
+}
+
+func (a *API) retryAnalyses(w http.ResponseWriter, r *http.Request) {
+	var req retryAnalysisRequest
+	if decodeJSON(w, r, 16<<10, &req) != nil || len(req.ArticleIDs) == 0 || len(req.ArticleIDs) > 100 {
+		invalid(w)
+		return
+	}
+	ids := make([]int64, 0, len(req.ArticleIDs))
+	seen := make(map[int64]struct{}, len(req.ArticleIDs))
+	for _, id := range req.ArticleIDs {
+		if id <= 0 {
+			invalid(w)
+			return
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	retried, skipped, err := a.Store.RetryFailedAnalysisJobs(r.Context(), ids)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"retried_ids": retried, "skipped_ids": skipped,
+		"retried": len(retried), "skipped": len(skipped),
+	})
 }
 
 func (a *API) recover(next http.Handler) http.Handler {
