@@ -52,6 +52,7 @@
     .local-dot { width: 8px; height: 8px; border-radius: 50%; background: #2f9b69; box-shadow: 0 0 0 3px var(--success-soft); }
     main { padding: 34px 0 48px; }
     .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 25px; }
+    .heading-actions { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
     .eyebrow { margin: 0 0 6px; color: var(--brand); font-size: 11px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
     h1, h2, h3, p { margin-top: 0; }
     h1 { margin-bottom: 7px; font-size: clamp(25px, 3vw, 31px); line-height: 1.2; letter-spacing: -.035em; }
@@ -74,6 +75,7 @@
     .stat-value { margin: 0; color: var(--ink); font-size: 21px; font-weight: 720; letter-spacing: -.025em; line-height: 1.25; }
     .panel { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
     .panel + .panel { margin-top: 16px; }
+    .service-settings { margin: -8px 0 18px; }
     .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 15px 19px; border-bottom: 1px solid var(--line); }
     .panel-title { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
     .panel-description { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
@@ -139,7 +141,8 @@
       main { padding-top: 25px; }
       .topbar-meta { font-size: 11px; }
       .page-heading { align-items: flex-start; flex-direction: column; gap: 15px; margin-bottom: 19px; }
-      .page-heading > .button { width: 100%; }
+      .heading-actions { width: 100%; }
+      .heading-actions .button { flex: 1; }
       .overview { gap: 8px; margin-bottom: 13px; }
       .stat-card { align-items: flex-start; flex-direction: column; gap: 9px; min-height: 114px; padding: 12px; }
       .stat-icon { width: 32px; height: 32px; border-radius: 8px; font-size: 16px; }
@@ -189,8 +192,27 @@
         <h1>RSSHub 订阅</h1>
         <p class="lede">集中管理 RSSHub 资讯源，并为每个订阅配置提交受众。</p>
       </div>
-      <button id="addButton" class="button button-primary" type="button"><i class="ri-add-line" aria-hidden="true"></i>添加订阅</button>
+      <div class="heading-actions">
+        <button id="toggleServiceButton" class="button" type="button" aria-expanded="false" aria-controls="targetSettings"><i class="ri-settings-3-line" aria-hidden="true"></i>采集服务</button>
+        <button id="addButton" class="button button-primary" type="button"><i class="ri-add-line" aria-hidden="true"></i>添加订阅</button>
+      </div>
     </header>
+
+    <section id="targetSettings" class="panel service-settings" aria-labelledby="serviceTitle" hidden>
+      <div class="panel-header">
+        <div><h2 id="serviceTitle" class="panel-title">采集服务配置</h2><p class="panel-description">设置 NewsScope 接收采集结果的服务地址。</p></div>
+      </div>
+      <div class="panel-body">
+        <form id="targetForm" class="config-form">
+          <label class="field" for="newsscopeUrl">
+            <span class="field-label">NewsScope 服务地址</span>
+            <input id="newsscopeUrl" class="control" type="url" inputmode="url" required autocomplete="url" placeholder="http://127.0.0.1:8886">
+          </label>
+          <button class="button button-primary" type="submit"><i class="ri-save-line" aria-hidden="true"></i>保存地址</button>
+        </form>
+        <p id="targetMessage" class="inline-message" role="status" aria-live="polite"></p>
+      </div>
+    </section>
 
     <section class="overview" aria-label="订阅概览">
       <article class="stat-card">
@@ -205,22 +227,6 @@
         <span class="stat-icon vip" aria-hidden="true"><i class="ri-vip-crown-line"></i></span>
         <div><p class="stat-label">VIP 受众</p><p id="vipCount" class="stat-value">—</p></div>
       </article>
-    </section>
-
-    <section class="panel" aria-labelledby="serviceTitle">
-      <div class="panel-header">
-        <div><h2 id="serviceTitle" class="panel-title">采集服务</h2><p class="panel-description">设置 NewsScope 接收采集结果的服务地址。</p></div>
-      </div>
-      <div class="panel-body">
-        <form id="targetForm" class="config-form">
-          <label class="field" for="newsscopeUrl">
-            <span class="field-label">NewsScope 服务地址</span>
-            <input id="newsscopeUrl" class="control" type="url" inputmode="url" required autocomplete="url" placeholder="http://127.0.0.1:8886">
-          </label>
-          <button class="button button-primary" type="submit"><i class="ri-save-line" aria-hidden="true"></i>保存地址</button>
-        </form>
-        <p id="targetMessage" class="inline-message" role="status" aria-live="polite"></p>
-      </div>
     </section>
 
     <section class="panel" aria-labelledby="subscriptionsTitle">
@@ -414,7 +420,7 @@
     function render(state) {
       latestState = state;
       const targetInput = $('#newsscopeUrl');
-      if (document.activeElement !== targetInput && !targetInput.dataset.dirty) targetInput.value = state.newsscope_url;
+      if (!targetInput.dataset.dirty) targetInput.value = state.newsscope_url;
       updateOverview(state.subscriptions);
       $('#subscriptionCount').textContent = `${state.subscriptions.length} 个订阅 · 状态每 15 秒更新`;
       renderSubscriptions(state.subscriptions);
@@ -441,6 +447,26 @@
       $('#formTitle').textContent = '添加订阅';
       setMessage($('#subscriptionMessage'), '');
       form.hidden = true;
+    }
+
+    function setTargetSettingsOpen(open) {
+      const settings = $('#targetSettings');
+      settings.hidden = !open;
+      const button = $('#toggleServiceButton');
+      button.setAttribute('aria-expanded', String(open));
+      button.replaceChildren(
+        icon(open ? 'ri-close-line' : 'ri-settings-3-line'),
+        document.createTextNode(open ? '收起设置' : '采集服务'),
+      );
+      if (open) {
+        setMessage($('#targetMessage'), '');
+        if (latestState && !$('#newsscopeUrl').dataset.dirty) {
+          $('#newsscopeUrl').value = latestState.newsscope_url;
+        }
+        $('#newsscopeUrl').focus({ preventScroll: true });
+      } else if (settings.contains(document.activeElement)) {
+        button.focus({ preventScroll: true });
+      }
     }
 
     function openForm(sub = null) {
@@ -473,6 +499,9 @@
     $('#cancelButton').addEventListener('click', closeForm);
     $('#cancelFormButton').addEventListener('click', closeForm);
     $('#refreshButton').addEventListener('click', () => refresh());
+    $('#toggleServiceButton').addEventListener('click', () => {
+      setTargetSettingsOpen($('#targetSettings').hidden);
+    });
     $('#searchInput').addEventListener('input', () => {
       if (latestState) renderSubscriptions(latestState.subscriptions);
     });
@@ -484,7 +513,8 @@
       try {
         await api('/api/config', { method: 'POST', body: JSON.stringify({ newsscope_url: $('#newsscopeUrl').value }) });
         $('#newsscopeUrl').dataset.dirty = '';
-        setMessage($('#targetMessage'), '服务地址已保存。', 'success');
+        notify('NewsScope 服务地址已保存。');
+        setTargetSettingsOpen(false);
       } catch (error) { setMessage($('#targetMessage'), error.message, 'error'); }
       finally { button.disabled = false; }
     });
