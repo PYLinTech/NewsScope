@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timezone
+from datetime import datetime
+from decimal import Decimal, DecimalException
 from email.utils import parsedate_to_datetime
 import errno
 import fcntl
@@ -33,11 +34,14 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 import uuid
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_PANEL_HOST = "127.0.0.1"
 DEFAULT_PANEL_PORT = 8885
 DEFAULT_NEWSCOPE_URL = "http://127.0.0.1:8886"
+DEFAULT_TIMEZONE_NAME = "Asia/Shanghai"
+DEFAULT_TIMEZONE = ZoneInfo(DEFAULT_TIMEZONE_NAME)
 DEFAULT_INTERVAL = 10
 DEFAULT_WORKERS = 4
 REQUEST_TIMEOUT_SECONDS = 25
@@ -235,27 +239,75 @@ def stable_entry_key(item_id: str, link: str, title: str, published: str) -> str
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
-def parse_publication_timestamp(value: str) -> Optional[int]:
-    text = value.strip()
-    if not text:
+def parse_publication_timestamp(value: object) -> Optional[int]:
+    """Return UTC Unix seconds; naive feed dates use DEFAULT_TIMEZONE."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
         return None
-    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+    text = " ".join(html.unescape(str(value)).strip("\ufeff \t\r\n").split())
+    if not text or len(text) > 128:
+        return None
+    # Compact calendar dates must be recognized before numeric timestamps.
+    if re.fullmatch(r"(?:19|20)\d{6}(?:\d{6})?", text):
         try:
-            timestamp = float(text)
-            if timestamp > 253402300799:
-                timestamp /= 1000
-            result = int(timestamp)
+            pattern = "%Y%m%d" if len(text) == 8 else "%Y%m%d%H%M%S"
+            parsed = datetime.strptime(text, pattern).replace(tzinfo=DEFAULT_TIMEZONE)
+            result = int(parsed.timestamp())
             return result if 0 < result <= 253402300799 else None
-        except (ValueError, OverflowError):
+        except ValueError:
             return None
+    numeric = re.fullmatch(r"([+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(s|ms|us|µs|ns)?", text)
+    if numeric:
+        try:
+            timestamp = Decimal(numeric.group(1))
+            unit = numeric.group(2)
+            if unit:
+                timestamp /= {"s": 1, "ms": 1000, "us": 1000000, "µs": 1000000, "ns": 1000000000}[unit]
+            else:
+                # Common epoch encodings use 10/13/16/19 digits. Decimal
+                # preserves subsecond precision even for nanosecond integers.
+                divisor = 1000000000 if timestamp >= 10**17 else 1000000 if timestamp >= 10**14 else 1000 if timestamp >= 10**11 else 1
+                timestamp /= divisor
+            if not 0 < timestamp <= 253402300799:
+                return None
+            result = int(timestamp)
+            return result if result > 0 else None
+        except (DecimalException, ValueError, OverflowError):
+            return None
+
+    # RFC 3339 allows leap seconds; normalize :60 without discarding the second.
+    text, leap_second = re.subn(r"(\d{1,2}:\d{2}):60(?=[.,\sZz+-]|$)", r"\1:59", text, count=1)
+    # Accept ISO/RFC dates plus common numeric dates emitted by imperfect feeds.
+    normalized = re.sub(r"^(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?", r"\1-\2-\3", text)
+    normalized = re.sub(r"[时点]", ":", normalized).replace("分", ":").replace("秒", "")
+    normalized = re.sub(r"[zZ]$", "+00:00", normalized)
+    normalized = re.sub(r"\s*(?:UTC|GMT)([+-]\d{1,2})(?::?(\d{2}))?$", lambda m: f"{m.group(1)[0]}{m.group(1)[1:].zfill(2)}:{m.group(2) or '00'}", normalized, flags=re.I)
+    normalized = re.sub(r"\s+(?:UTC|GMT)$", "+00:00", normalized, flags=re.I)
+    normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
     try:
         try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(normalized)
         except ValueError:
-            parsed = parsedate_to_datetime(text)
+            try:
+                # Pad single-digit month/day components without changing RFC dates.
+                numeric_date = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})(.*)", normalized)
+                if numeric_date is None:
+                    raise ValueError("not a numeric date")
+                year, month, day, rest = numeric_date.groups()
+                rest = re.sub(
+                    r"^([Tt ])(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?",
+                    lambda m: f"{m.group(1)}{int(m.group(2)):02d}:{int(m.group(3)):02d}" + (f":{int(m.group(4)):02d}" if m.group(4) else ""),
+                    rest,
+                )
+                parsed = datetime.fromisoformat(f"{year}-{int(month):02d}-{int(day):02d}{rest}")
+            except ValueError:
+                rfc_date = re.sub(r"\s+(?:UTC|GMT)([+-]\d{1,2})(?::?(\d{2}))?$", lambda m: f" {m.group(1)[0]}{m.group(1)[1:].zfill(2)}{m.group(2) or '00'}", text, flags=re.I)
+                rfc_date = re.sub(r"([+-]\d{2}):(\d{2})$", r"\1\2", rfc_date)
+                parsed = parsedate_to_datetime(rfc_date)
+                if parsed.tzinfo is None and re.search(r"[A-Za-z]{2,}$", rfc_date):
+                    return None  # An unknown timezone must not silently become UTC.
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        result = int(parsed.timestamp())
+            parsed = parsed.replace(tzinfo=DEFAULT_TIMEZONE)
+        result = int(parsed.timestamp()) + leap_second
         return result if 0 < result <= 253402300799 else None
     except (TypeError, ValueError, OverflowError, OSError):
         return None
@@ -271,14 +323,19 @@ def publication_timestamp(value: str, fallback: int, secondary: str = "") -> int
 
 def preferred_publication_value(values: tuple[object, ...]) -> str:
     for raw in values:
-        value = str(raw or "").strip()
-        if parse_publication_timestamp(value) is not None:
-            return value
+        if parse_publication_timestamp(raw) is not None:
+            return str(raw).strip()
     return ""
 
 
 def preferred_publication_date(element: ET.Element, names: tuple[str, ...]) -> str:
-    children = list(element)
+    # Only standard date namespaces qualify; e.g. media:date is not an
+    # article publication date merely because it shares the local name.
+    namespaces = {
+        "", "http://www.w3.org/2005/Atom", "http://purl.org/atom/ns#",
+        "http://purl.org/dc/elements/1.1/", "http://purl.org/dc/terms/",
+    }
+    children = [child for child in element if (child.tag[1:].split("}", 1)[0] if child.tag.startswith("{") else "") in namespaces]
     values = tuple(
         plain_text(element_content(child))
         for name in names
@@ -344,7 +401,11 @@ def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
                 continue
             related_urls = action.get("related_urls") if isinstance(action, dict) else None
             link = str((related_urls[0] if isinstance(related_urls, list) and related_urls else "") or entry.get("id") or "").strip()
-            published = preferred_publication_value((metadata.get("pub_date"), entry.get("timestamp")))
+            published = preferred_publication_value((
+                metadata.get("pub_date"), metadata.get("date_published"),
+                metadata.get("published"), entry.get("timestamp"),
+                metadata.get("date_modified"),
+            ))
             body = plain_text(str(metadata.get("description") or "")) or title
             parsed.append({
                 "key": stable_entry_key(str(entry.get("id") or ""), link, title, published),
@@ -376,18 +437,13 @@ def extract_feed(xml_bytes: bytes) -> tuple[str, list[dict[str, str]]]:
         entries = [node for node in list(item_container) if local_name(node.tag) == "item"]
 
     feed_title = first_child_text(container, {"title"})
-    feed_fallback_date = ""
-    if root_kind != "feed":
-        feed_fallback_date = preferred_publication_date(
-            container,
-            ("pubdate", "lastbuilddate"),
-        )
-    parsed: list[dict[str, str]] = []
     date_priority = (
-        ("published", "pubdate", "date", "updated")
+        ("published", "issued", "pubdate", "date", "created", "updated", "modified")
         if root_kind == "feed"
-        else ("pubdate", "published", "date", "updated")
+        else ("pubdate", "published", "issued", "date", "created", "updated", "modified")
     )
+    feed_fallback_date = preferred_publication_date(container, date_priority + ("lastbuilddate",))
+    parsed: list[dict[str, str]] = []
     for item in entries[:5000]:
         title = first_child_text(item, {"title"})
         link = feed_link(item)
