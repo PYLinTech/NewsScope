@@ -11,36 +11,38 @@ import (
 )
 
 type Config struct {
-	OpenAIBaseURL string
-	OpenAIAPIKey  string
-	OpenAIModel   string
-	NormalAddr    string
-	VIPAddr       string
-	CollectorPort int
-	AdminPort     int
-	MaxQueryCount int
-	Categories    []string
-	DatabasePath  string
-	Workers       int
-	MaxAttempts   int
-	TimeoutSec    int
-	MaxBodyChars  int
+	OpenAIBaseURL   string
+	OpenAIAPIKey    string
+	OpenAIModel     string
+	NormalAddr      string
+	VIPAddr         string
+	CollectorPort   int
+	AdminPort       int
+	MaxQueryCount   int
+	Categories      []string
+	DatabasePath    string
+	Workers         int
+	MaxAttempts     int
+	TimeoutSec      int
+	MaxBodyChars    int
+	MaxSummaryChars int
 }
 
 func Load() (Config, error) {
 	loadDotEnv(".env")
 	c := Config{
-		OpenAIBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), "/"),
-		OpenAIAPIKey:  strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
-		OpenAIModel:   strings.TrimSpace(os.Getenv("OPENAI_MODEL")),
-		NormalAddr:    env("NORMAL_ADDR", "127.0.0.1:8887"),
-		VIPAddr:       env("VIP_ADDR", "127.0.0.1:8888"),
-		MaxQueryCount: intEnv("MAX_QUERY_COUNT", 100),
-		DatabasePath:  env("DATABASE_PATH", "./data/newsscope.db"),
-		Workers:       intEnv("ANALYSIS_WORKERS", 3),
-		MaxAttempts:   intEnv("ANALYSIS_MAX_ATTEMPTS", 5),
-		TimeoutSec:    intEnv("ANALYSIS_TIMEOUT_SECONDS", 45),
-		MaxBodyChars:  intEnv("ANALYSIS_MAX_BODY_CHARS", 12000),
+		OpenAIBaseURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), "/"),
+		OpenAIAPIKey:    strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		OpenAIModel:     strings.TrimSpace(os.Getenv("OPENAI_MODEL")),
+		NormalAddr:      env("NORMAL_ADDR", "127.0.0.1:8887"),
+		VIPAddr:         env("VIP_ADDR", "127.0.0.1:8888"),
+		MaxQueryCount:   intEnv("MAX_QUERY_COUNT", 100),
+		DatabasePath:    env("DATABASE_PATH", "./data/newsscope.db"),
+		Workers:         intEnv("ANALYSIS_WORKERS", 3),
+		MaxAttempts:     intEnv("ANALYSIS_MAX_ATTEMPTS", 5),
+		TimeoutSec:      intEnv("ANALYSIS_TIMEOUT_SECONDS", 45),
+		MaxBodyChars:    intEnv("ANALYSIS_MAX_BODY_CHARS", 12000),
+		MaxSummaryChars: intEnv("ANALYSIS_MAX_SUMMARY_CHARS", 120),
 	}
 	c.CollectorPort = intEnv("COLLECTOR_PORT", 8886)
 	c.AdminPort = intEnv("ADMIN_PORT", 8889)
@@ -54,8 +56,8 @@ func Load() (Config, error) {
 	if c.MaxQueryCount < 1 || c.MaxQueryCount > 10000 {
 		return c, fmt.Errorf("MAX_QUERY_COUNT must be between 1 and 10000")
 	}
-	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.TimeoutSec > 600 || c.MaxBodyChars < 100 || c.MaxBodyChars > 200000 {
-		return c, fmt.Errorf("analysis worker, retry, timeout or body limit configuration is invalid")
+	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.TimeoutSec > 600 || c.MaxBodyChars < 100 || c.MaxBodyChars > 200000 || c.MaxSummaryChars < 1 || c.MaxSummaryChars > 2000 {
+		return c, fmt.Errorf("analysis worker, retry, timeout, body limit or summary limit configuration is invalid")
 	}
 	for name, addr := range map[string]string{"NORMAL_ADDR": c.NormalAddr, "VIP_ADDR": c.VIPAddr} {
 		_, portText, err := net.SplitHostPort(addr)

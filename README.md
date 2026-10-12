@@ -80,6 +80,7 @@ The service loads `.env` from the current working directory. It creates the pare
 | `ANALYSIS_MAX_ATTEMPTS` | `5` | Maximum analysis attempts before a job is left failed. |
 | `ANALYSIS_TIMEOUT_SECONDS` | `45` | Timeout for one model analysis request. |
 | `ANALYSIS_MAX_BODY_CHARS` | `12000` | Maximum body characters passed to the analysis model. The stored article body remains the submitted content. |
+| `ANALYSIS_MAX_SUMMARY_CHARS` | `120` | Maximum summary characters. Bodies at or below this length are used verbatim; longer bodies are summarized and capped at this length. |
 
 ## Collector contract
 
@@ -249,7 +250,7 @@ Hiding updates the article status and hidden time; it does not delete the record
 
 ## Analysis and duplicate handling
 
-After an article is accepted, a background worker asks the configured model to select one configured category, produce 2–6 keywords, write a Chinese summary of at most 120 characters, and assign an integer importance rating from 1 (lowest) to 5 (highest). Importance is based on supported impact, scope, and urgency rather than dramatic wording. Article bodies are stored as submitted; only the configured character limit is sent to the analysis model.
+After an article is accepted, a background worker asks the configured model to select one configured category, produce 2–6 keywords, write a Chinese summary capped by `ANALYSIS_MAX_SUMMARY_CHARS`, and assign an integer importance rating from 1 (lowest) to 5 (highest). Bodies at or below the summary limit are used verbatim; longer bodies are summarized and capped at that limit. Importance is based on supported impact, scope, and urgency rather than dramatic wording. Article bodies are stored as submitted; only `ANALYSIS_MAX_BODY_CHARS` is sent to the analysis model.
 
 For duplicate detection, NewsScope compares each incoming article's title and body with candidate articles collected during the previous 24 hours in the same audience. Fuzzy similarity weights the title at 30% and body at 70%. The model then reviews similar candidates and confirms whether they describe the same specific event. Only model-confirmed duplicates are discarded. Normal and VIP data are not compared with each other.
 

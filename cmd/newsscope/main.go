@@ -39,7 +39,7 @@ func run(logger *log.Logger) error {
 		return err
 	}
 	defer store.DB.Close()
-	model := analyzer.New(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.Categories, cfg.MaxBodyChars, cfg.TimeoutSec)
+	model := analyzer.New(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.Categories, cfg.MaxBodyChars, cfg.MaxSummaryChars, cfg.TimeoutSec)
 	api := server.New(store, cfg, logger, model)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

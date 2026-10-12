@@ -71,7 +71,7 @@ func TestIngestUsesModelToConfirmCodeSimilarity(t *testing.T) {
 	}
 
 	calls := 0
-	model := analyzer.New("http://model.invalid/v1", "test-key", "test-model", nil, 2000, 5)
+	model := analyzer.New("http://model.invalid/v1", "test-key", "test-model", nil, 2000, 120, 5)
 	model.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		decision := `{"duplicate":false,"matched_id":0}`
