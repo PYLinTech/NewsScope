@@ -284,6 +284,8 @@
     const form = $('#subscriptionForm');
     let latestState = null;
     let refreshInFlight = false;
+    let refreshController = null;
+    let refreshTimer = null;
     let toastTimer = null;
 
     function setMessage(element, text, kind = '') {
@@ -307,10 +309,21 @@
         headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) },
         cache: 'no-store',
       });
-      let value;
-      try { value = await response.json(); }
-      catch { throw new Error(`服务器返回了无法读取的响应（${response.status}）`); }
-      if (!response.ok) throw new Error(value.error || `请求失败（${response.status}）`);
+      const text = await response.text();
+      let value = {};
+      if (text.trim()) {
+        try { value = JSON.parse(text); }
+        catch {
+          if (response.ok) throw new Error(`服务器返回了无法读取的响应（${response.status}）`);
+          value = { error: text.trim() };
+        }
+      } else if (response.ok && (!options.method || options.method === 'GET')) {
+        throw new Error(`服务器未返回所需数据（${response.status}）`);
+      }
+      if (!response.ok) {
+        const detail = value && typeof value === 'object' ? value.error : '';
+        throw new Error(detail || `请求失败（${response.status}）`);
+      }
       return value;
     }
 
@@ -429,15 +442,22 @@
     async function refresh({ quiet = false } = {}) {
       if (refreshInFlight) return;
       refreshInFlight = true;
+      const controller = new AbortController();
+      refreshController = controller;
       $('#refreshButton').disabled = true;
       try {
-        render(await api('/api/state'));
+        render(await api('/api/state', { signal: controller.signal }));
       } catch (error) {
-        $('#subscriptionCount').textContent = '暂时无法读取订阅状态';
-        if (!quiet) notify(error.message, 'error');
+        if (error.name !== 'AbortError') {
+          $('#subscriptionCount').textContent = '暂时无法读取订阅状态';
+          if (!quiet) notify(error.message, 'error');
+        }
       } finally {
-        refreshInFlight = false;
-        $('#refreshButton').disabled = false;
+        if (refreshController === controller) {
+          refreshController = null;
+          refreshInFlight = false;
+          $('#refreshButton').disabled = false;
+        }
       }
     }
 
@@ -471,7 +491,7 @@
 
     function openForm(sub = null) {
       form.reset();
-      $('#subscriptionId').value = sub?.id || '';
+      $('#subscriptionId').value = sub?.id == null ? '' : String(sub.id);
       $('#subscriptionName').value = sub?.name || '';
       $('#subscriptionUrl').value = sub?.url || '';
       $('#subscriptionAudience').value = sub?.audience || 'normal';
@@ -485,11 +505,12 @@
     function editSubscription(sub) { openForm(sub); }
 
     async function deleteSubscription(sub) {
+      const subID = String(sub.id);
       const label = sub.name || sub.url;
       if (!window.confirm(`确定删除订阅“${label}”吗？`)) return;
       try {
-        await api(`/api/subscriptions/${encodeURIComponent(sub.id)}`, { method: 'DELETE' });
-        if ($('#subscriptionId').value === sub.id) closeForm();
+        await api(`/api/subscriptions/${encodeURIComponent(subID)}`, { method: 'DELETE' });
+        if (String($('#subscriptionId').value) === subID) closeForm();
         notify('订阅已删除。');
         await refresh({ quiet: true });
       } catch (error) { notify(error.message, 'error'); }
@@ -510,9 +531,12 @@
       event.preventDefault();
       const button = event.currentTarget.querySelector('button[type="submit"]');
       button.disabled = true;
+      const newsscopeURL = $('#newsscopeUrl').value;
       try {
-        await api('/api/config', { method: 'POST', body: JSON.stringify({ newsscope_url: $('#newsscopeUrl').value }) });
+        await api('/api/config', { method: 'POST', body: JSON.stringify({ newsscope_url: newsscopeURL }) });
         $('#newsscopeUrl').dataset.dirty = '';
+        $('#newsscopeUrl').value = newsscopeURL;
+        if (latestState) latestState.newsscope_url = newsscopeURL;
         notify('NewsScope 服务地址已保存。');
         setTargetSettingsOpen(false);
       } catch (error) { setMessage($('#targetMessage'), error.message, 'error'); }
@@ -542,11 +566,32 @@
       finally { button.disabled = false; }
     });
 
+    function startAutoRefresh() {
+      window.clearInterval(refreshTimer);
+      refreshTimer = window.setInterval(() => refresh({ quiet: true }), 15000);
+    }
+
     refresh({ quiet: true });
-    const refreshTimer = window.setInterval(() => refresh({ quiet: true }), 15000);
+    startAutoRefresh();
     window.addEventListener('pagehide', () => {
       window.clearInterval(refreshTimer);
+      refreshTimer = null;
+      refreshController?.abort();
+      refreshController = null;
+      refreshInFlight = false;
+      $('#refreshButton').disabled = false;
       window.clearTimeout(toastTimer);
+      toastTimer = null;
+      $('#toast').hidden = true;
+    });
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) {
+        refresh({ quiet: true });
+        startAutoRefresh();
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refresh({ quiet: true });
     });
   </script>
 </body>
