@@ -40,14 +40,36 @@ func TestIngestRejectsBadItemsIndividually(t *testing.T) {
 	}
 	var got struct {
 		Accepted   int `json:"accepted"`
+		Queued     int `json:"queued"`
 		Duplicates int `json:"duplicates"`
 		Rejected   int `json:"rejected"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Accepted != 1 || got.Duplicates != 0 || got.Rejected != 3 {
-		t.Fatalf("counts=%+v; want accepted=1 duplicates=0 rejected=3", got)
+	if got.Accepted != 1 || got.Queued != 1 || got.Duplicates != 0 || got.Rejected != 3 {
+		t.Fatalf("counts=%+v; want accepted=1 queued=1 duplicates=0 rejected=3", got)
+	}
+	var queued int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM ingest_queue WHERE status='pending'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 1 {
+		t.Fatalf("pending queue jobs=%d; want 1", queued)
+	}
+
+	// A client retry after a lost ACK must reuse the existing durable queue row.
+	retry := httptest.NewRequest(http.MethodPost, "/ingest/normal", bytes.NewBufferString(body))
+	retryResponse := httptest.NewRecorder()
+	api.CollectorHandler().ServeHTTP(retryResponse, retry)
+	if retryResponse.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", retryResponse.Code, retryResponse.Body.String())
+	}
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM ingest_queue WHERE status='pending'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 1 {
+		t.Fatalf("pending queue jobs after retry=%d; want one idempotent job", queued)
 	}
 }
 
@@ -90,6 +112,7 @@ func TestIngestUsesModelToConfirmCodeSimilarity(t *testing.T) {
 	api := New(store, config.Config{}, log.New(io.Discard, "", 0), model)
 	type ingestCounts struct {
 		Accepted   int `json:"accepted"`
+		Queued     int `json:"queued"`
 		Duplicates int `json:"duplicates"`
 	}
 
@@ -112,14 +135,35 @@ func TestIngestUsesModelToConfirmCodeSimilarity(t *testing.T) {
 		}
 		return got
 	}
+	processNext := func() storage.IngestResult {
+		t.Helper()
+		job, ok, err := store.ClaimIngest(context.Background())
+		if err != nil || !ok {
+			t.Fatalf("claim ingestion job: job=%+v ok=%v err=%v", job, ok, err)
+		}
+		result, err := api.ProcessQueuedArticle(context.Background(), job.Article, job.Audience)
+		if err != nil {
+			t.Fatalf("process queued article: %v", err)
+		}
+		if err := store.CompleteIngest(context.Background(), job); err != nil {
+			t.Fatalf("complete ingestion job: %v", err)
+		}
+		return result
+	}
 
 	duplicate := post("老旧社区更新项目公布")
-	if duplicate.Duplicates != 1 || duplicate.Accepted != 1 {
-		t.Fatalf("duplicate decision counts=%v", duplicate)
+	if duplicate.Accepted != 1 || duplicate.Queued != 1 || duplicate.Duplicates != 0 || calls != 0 {
+		t.Fatalf("duplicate candidate should be acknowledged before async review: counts=%v model_calls=%d", duplicate, calls)
+	}
+	if result := processNext(); result.Status != "duplicate" || result.ArticleID != first.ArticleID {
+		t.Fatalf("duplicate review result=%+v; want existing article %d", result, first.ArticleID)
 	}
 	nonDuplicate := post("另一个城市更新项目的新阶段")
-	if nonDuplicate.Accepted != 1 || nonDuplicate.Duplicates != 0 {
+	if nonDuplicate.Accepted != 1 || nonDuplicate.Queued != 1 || nonDuplicate.Duplicates != 0 {
 		t.Fatalf("non-duplicate decision counts=%v", nonDuplicate)
+	}
+	if result := processNext(); result.Status != "accepted" {
+		t.Fatalf("non-duplicate review result=%+v; want accepted", result)
 	}
 	if calls != 2 {
 		t.Fatalf("model review calls=%d; want 2", calls)

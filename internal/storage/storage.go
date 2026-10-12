@@ -19,10 +19,11 @@ import (
 )
 
 type Store struct {
-	DB      *sql.DB
-	claimMu sync.Mutex
-	jobWake chan struct{}
-	wal     bool
+	DB         *sql.DB
+	writeMu    sync.Mutex
+	jobWake    chan struct{}
+	ingestWake chan struct{}
+	wal        bool
 }
 
 const jobWakeBuffer = 64
@@ -49,6 +50,12 @@ type IngestResult struct {
 	Status    string `json:"status"`
 	ArticleID int64  `json:"article_id,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+}
+type IngestJob struct {
+	ID       int64
+	Article  ArticleInput
+	Audience string
+	Attempts int
 }
 type Card struct {
 	ID          int64    `json:"id"`
@@ -114,7 +121,7 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(maxConnections)
 	db.SetMaxIdleConns(maxConnections)
-	s := &Store{DB: db, jobWake: make(chan struct{}, jobWakeBuffer), wal: path != ":memory:"}
+	s := &Store{DB: db, jobWake: make(chan struct{}, jobWakeBuffer), ingestWake: make(chan struct{}, jobWakeBuffer), wal: path != ":memory:"}
 	if err := s.initSchema(); err != nil {
 		db.Close()
 		return nil, err
@@ -131,6 +138,8 @@ func Open(path string) (*Store, error) {
 // Maintain refreshes planner statistics and passively checkpoints the WAL.
 // SQLite's automatic WAL checkpoint remains enabled as a safety net.
 func (s *Store) Maintain(ctx context.Context) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if _, err := s.DB.ExecContext(ctx, "PRAGMA optimize"); err != nil {
 		return fmt.Errorf("optimize SQLite query planner: %w", err)
 	}
@@ -164,6 +173,18 @@ CREATE INDEX IF NOT EXISTS idx_articles_order ON articles(audience,collected_at 
 CREATE INDEX IF NOT EXISTS idx_articles_recent_ingest ON articles(audience,created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash);
 CREATE INDEX IF NOT EXISTS idx_articles_normalized_url ON articles(normalized_url) WHERE normalized_url IS NOT NULL;
+CREATE TABLE IF NOT EXISTS ingest_queue (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ source TEXT, title TEXT, body TEXT, collected_at INTEGER, original_url TEXT,
+ audience TEXT NOT NULL CHECK(audience IN ('normal','vip')),
+ content_hash TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('pending','processing','completed')),
+ attempts INTEGER NOT NULL DEFAULT 0, next_run_at INTEGER NOT NULL,
+ last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+ UNIQUE(audience,content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_queue_ready ON ingest_queue(status,next_run_at,id);
+CREATE INDEX IF NOT EXISTS idx_ingest_queue_processing ON ingest_queue(status,updated_at,id);
 CREATE TABLE IF NOT EXISTS analysis_jobs (
  article_id INTEGER PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
  status TEXT NOT NULL CHECK(status IN ('pending','processing','completed','failed')),
@@ -193,20 +214,22 @@ CREATE INDEX IF NOT EXISTS idx_analyses_category ON analyses(category, article_i
 }
 
 func (s *Store) Ingest(ctx context.Context, in ArticleInput, audience string) (IngestResult, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	var valid bool
 	in, valid = NormalizeArticle(in)
 	if (audience != AudienceNormal && audience != AudienceVIP) || !valid {
 		return IngestResult{Status: "rejected", Reason: "invalid_article"}, nil
 	}
 	normalized := normalizeURL(in.OriginalURL)
-	h := sha256.Sum256([]byte(in.Source + "\x00" + in.Title + "\x00" + in.Body))
+	contentHash := articleContentHash(in)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return IngestResult{}, err
 	}
 	defer tx.Rollback()
 	var id int64
-	res, err := tx.ExecContext(ctx, `INSERT INTO articles(source,title,body,collected_at,original_url,normalized_url,content_hash,audience,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, in.Source, in.Title, in.Body, in.CollectedAt, nullString(in.OriginalURL), nullString(normalized), hex.EncodeToString(h[:]), audience, time.Now().Unix())
+	res, err := tx.ExecContext(ctx, `INSERT INTO articles(source,title,body,collected_at,original_url,normalized_url,content_hash,audience,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, in.Source, in.Title, in.Body, in.CollectedAt, nullString(in.OriginalURL), nullString(normalized), contentHash, audience, time.Now().Unix())
 	if err != nil {
 		return IngestResult{}, err
 	}
@@ -222,6 +245,173 @@ func (s *Store) Ingest(ctx context.Context, in ArticleInput, audience string) (I
 	}
 	s.signalJob()
 	return IngestResult{Status: "accepted", ArticleID: id}, nil
+}
+
+func articleContentHash(in ArticleInput) string {
+	h := sha256.Sum256([]byte(in.Source + "\x00" + in.Title + "\x00" + in.Body))
+	return hex.EncodeToString(h[:])
+}
+
+// EnqueueIngestBatch durably records valid articles before returning an ACK.
+// Existing articles and completed queue entries are reported as duplicates;
+// pending or processing entries are safe to acknowledge again on client retry.
+func (s *Store) EnqueueIngestBatch(ctx context.Context, articles []ArticleInput, audience string) ([]IngestResult, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	results := make([]IngestResult, len(articles))
+	if audience != AudienceNormal && audience != AudienceVIP {
+		return nil, fmt.Errorf("invalid ingestion audience")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	queued := 0
+	for index, original := range articles {
+		article, valid := NormalizeArticle(original)
+		if !valid {
+			results[index] = IngestResult{Status: "rejected", Reason: "invalid_article"}
+			continue
+		}
+		hash := articleContentHash(article)
+		var exists int
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM articles WHERE audience=? AND content_hash=? LIMIT 1`, audience, hash).Scan(&exists)
+		if err == nil {
+			results[index] = IngestResult{Status: "duplicate"}
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO ingest_queue(source,title,body,collected_at,original_url,audience,content_hash,status,attempts,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending',0,?,?,?) ON CONFLICT(audience,content_hash) DO NOTHING`, article.Source, article.Title, article.Body, article.CollectedAt, nullString(article.OriginalURL), audience, hash, now, now, now)
+		if err != nil {
+			return nil, err
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if inserted == 1 {
+			queued++
+			results[index] = IngestResult{Status: "accepted"}
+			continue
+		}
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM ingest_queue WHERE audience=? AND content_hash=?`, audience, hash).Scan(&status); err != nil {
+			return nil, err
+		}
+		if status == "completed" {
+			results[index] = IngestResult{Status: "duplicate"}
+		} else {
+			results[index] = IngestResult{Status: "accepted"}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for range queued {
+		s.signalIngest()
+	}
+	return results, nil
+}
+
+func (s *Store) ClaimIngest(ctx context.Context) (IngestJob, bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return IngestJob{}, false, err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	var job IngestJob
+	err = tx.QueryRowContext(ctx, `SELECT id,source,title,body,collected_at,COALESCE(original_url,''),audience,attempts FROM ingest_queue WHERE status='pending' AND next_run_at<=? ORDER BY next_run_at,id LIMIT 1`, now).Scan(&job.ID, &job.Article.Source, &job.Article.Title, &job.Article.Body, &job.Article.CollectedAt, &job.Article.OriginalURL, &job.Audience, &job.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(ctx, `SELECT id,source,title,body,collected_at,COALESCE(original_url,''),audience,attempts FROM ingest_queue WHERE status='processing' AND updated_at<? ORDER BY updated_at,id LIMIT 1`, now-processingLeaseSeconds).Scan(&job.ID, &job.Article.Source, &job.Article.Title, &job.Article.Body, &job.Article.CollectedAt, &job.Article.OriginalURL, &job.Audience, &job.Attempts)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return IngestJob{}, false, nil
+	}
+	if err != nil {
+		return IngestJob{}, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ingest_queue SET status='processing',attempts=attempts+1,updated_at=? WHERE id=?`, now, job.ID); err != nil {
+		return IngestJob{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return IngestJob{}, false, err
+	}
+	job.Attempts++
+	return job, true, nil
+}
+
+func (s *Store) CompleteIngest(ctx context.Context, job IngestJob) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	now := time.Now().Unix()
+	_, err := s.DB.ExecContext(ctx, `UPDATE ingest_queue SET status='completed',source=NULL,title=NULL,body=NULL,collected_at=NULL,original_url=NULL,last_error=NULL,updated_at=? WHERE id=?`, now, job.ID)
+	return err
+}
+
+func (s *Store) RetryIngest(ctx context.Context, job IngestJob, cause error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	delay := int64(1 << min(job.Attempts-1, 9))
+	if delay > 300 {
+		delay = 300
+	}
+	message := cause.Error()
+	if len(message) > 1000 {
+		message = message[:1000]
+	}
+	now := time.Now().Unix()
+	_, err := s.DB.ExecContext(ctx, `UPDATE ingest_queue SET status='pending',next_run_at=?,last_error=?,updated_at=? WHERE id=? AND status='processing'`, now+delay, message, now, job.ID)
+	if err == nil {
+		s.signalIngest()
+	}
+	return err
+}
+
+func (s *Store) ReleaseIngest(ctx context.Context, job IngestJob) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	now := time.Now().Unix()
+	_, err := s.DB.ExecContext(ctx, `UPDATE ingest_queue SET status='pending',next_run_at=?,updated_at=? WHERE id=? AND status='processing'`, now, now, job.ID)
+	if err == nil {
+		s.signalIngest()
+	}
+	return err
+}
+
+func (s *Store) WaitForIngest(ctx context.Context, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-s.ingestWake:
+	case <-timer.C:
+	}
+}
+
+func (s *Store) signalIngest() {
+	select {
+	case s.ingestWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Store) FindExactArticle(ctx context.Context, in ArticleInput, audience string) (int64, bool, error) {
+	var id int64
+	err := s.DB.QueryRowContext(ctx, `SELECT id FROM articles WHERE audience=? AND content_hash=? LIMIT 1`, audience, articleContentHash(in)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
 }
 
 // WaitForJob sleeps until an ingestion wakes a worker or the fallback timer
@@ -434,6 +624,8 @@ func decodeKeywords(raw string) ([]string, error) {
 }
 
 func (s *Store) Hide(ctx context.Context, id int64) (string, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -470,10 +662,9 @@ type Job struct {
 }
 
 func (s *Store) Claim(ctx context.Context) (Job, bool, error) {
-	// Multiple workers share a store; serialize only the short claim transaction
-	// so two workers cannot select the same pending job.
-	s.claimMu.Lock()
-	defer s.claimMu.Unlock()
+	// The write lock keeps selection and lease update atomic across workers.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -507,6 +698,8 @@ func (s *Store) Complete(ctx context.Context, job Job, category string, keywords
 	if importance < 1 || importance > 5 {
 		return fmt.Errorf("importance must be between 1 and 5")
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	raw, err := json.Marshal(keywords)
 	if err != nil {
 		return err
@@ -527,6 +720,8 @@ func (s *Store) Complete(ctx context.Context, job Job, category string, keywords
 }
 
 func (s *Store) Fail(ctx context.Context, job Job, maxAttempts int, cause error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	status := "pending"
 	delay := int64(1 << min(job.Attempts-1, 8))
 	if job.Attempts >= maxAttempts {
@@ -546,6 +741,8 @@ func (s *Store) Fail(ctx context.Context, job Job, maxAttempts int, cause error)
 // shutting down. Shutdown cancellation is not a model failure and should not
 // consume a retry attempt or leave the job leased for several minutes.
 func (s *Store) Release(ctx context.Context, job Job) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	now := time.Now().Unix()
 	_, err := s.DB.ExecContext(ctx, `UPDATE analysis_jobs SET status='pending',attempts=?,next_run_at=?,last_error=NULL,updated_at=? WHERE article_id=? AND status='processing'`, max(job.Attempts-1, 0), now, now, job.ArticleID)
 	if err == nil {

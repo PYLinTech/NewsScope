@@ -17,14 +17,15 @@ NewsScope is a Go service for collecting, analyzing, and querying news articles.
 ## Architecture
 
 ```text
-Independent collectors
-        │ POST /ingest/normal or /ingest/vip
-        ▼
-NewsScope collector listener ──► SQLite ──► analysis workers ──► OpenAI-compatible API
-                                      │
-                   ┌──────────────────┴──────────────────┐
-                   ▼                                     ▼
-        normal query listener                  vip query listener
+Collectors ──► Ingest API ──► SQLite ingest queue ──► 8 ingestion workers
+                                                     │
+                   OpenAI-compatible API ◄── analysis workers ◄── SQLite analysis queue
+                                                     │
+                                      duplicate review + article storage
+                                                     │
+                                ┌────────────────────┴───────────────────┐
+                                ▼                                        ▼
+                     normal query listener                    vip query listener
 ```
 
 | Listener | Default address | Endpoints |
@@ -110,7 +111,7 @@ Send a batch using this JSON shape:
 
 `source`, `title`, `body`, and `collected_at` are required. `original_url` is optional and may be omitted or empty. `collected_at` is the time the collector obtained the article, represented as an integer Unix timestamp in seconds. It is not the time an event described in the article occurred. NewsScope does not extract or separately process event dates; such facts remain in the submitted title and body.
 
-The request accepts 1–500 articles and is limited to 10 MiB. Unknown JSON fields are rejected. The collector must choose the audience by selecting the endpoint; there is no audience field in the payload. Submit only source content and collection metadata. NewsScope assigns internal IDs and analyzes the article after ingestion.
+The request accepts 1–500 articles and is limited to 10 MiB. Unknown JSON fields are rejected. The collector must choose the audience by selecting the endpoint; there is no audience field in the payload. Submit only source content and collection metadata. NewsScope assigns internal IDs. The collector listener persists valid submissions to SQLite and acknowledges them before duplicate review and analysis run in the background. Eight ingestion workers process the durable queue; analysis then uses the separately configured `ANALYSIS_WORKERS` count.
 
 Example response:
 
@@ -118,15 +119,16 @@ Example response:
 {
   "version": 1,
   "accepted": 1,
+  "queued": 1,
   "duplicates": 0,
   "rejected": 0,
   "results": [
-    {"status": "accepted", "article_id": 8123}
+    {"status": "accepted"}
   ]
 }
 ```
 
-`accepted` includes newly stored articles and articles confirmed as duplicates; `duplicates` is a subset of `accepted`. Neither status means model analysis is complete. Each result reports `accepted`, `duplicate`, or `rejected`; rejected entries may include a reason. A duplicate result can include the existing `article_id`.
+`accepted` counts valid articles durably queued or confirmed as duplicates; `queued` is the subset accepted for background processing, and `duplicates` is the subset already present. The response is sent after the queue transaction commits, so `accepted` does not mean the article has passed duplicate review or been stored in the article table. A queued item may later be rejected by duplicate review. Each result reports `accepted`, `duplicate`, or `rejected`; rejected entries may include a reason. A duplicate result can include the existing `article_id` when available.
 
 ## Query API
 

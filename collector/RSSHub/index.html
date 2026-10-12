@@ -400,7 +400,7 @@
         const details = hasError
           ? sub.error
           : hasSuccess
-            ? `新收录 ${sub.accepted || 0} 条 · 重复 ${sub.duplicates || 0} 条`
+            ? `已入队 ${sub.accepted || 0} 条 · 重复 ${sub.duplicates || 0} 条`
             : '首次轮询后显示采集状态';
         const healthDetail = element('div', 'health-detail', details);
         healthDetail.title = details;

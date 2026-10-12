@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import errno
 import fcntl
 import hashlib
@@ -36,13 +38,15 @@ import xml.etree.ElementTree as ET
 DEFAULT_PANEL_HOST = "127.0.0.1"
 DEFAULT_PANEL_PORT = 8885
 DEFAULT_NEWSCOPE_URL = "http://127.0.0.1:8886"
-DEFAULT_INTERVAL = 300
+DEFAULT_INTERVAL = 60
 DEFAULT_WORKERS = 4
 REQUEST_TIMEOUT_SECONDS = 25
 MAX_FEED_BYTES = 12 * 1024 * 1024
-MAX_BATCH_ITEMS = 100
-MAX_BATCH_BYTES = 7 * 1024 * 1024
+MAX_BATCH_ITEMS = 500
+MAX_BATCH_BYTES = 9 * 1024 * 1024
 MAX_ARTICLE_BYTES = 2 * 1024 * 1024
+MAX_CONCURRENT_SUBMISSIONS = 2
+SUBMISSION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_SUBMISSIONS)
 SEEN_LIMIT = 1000
 USER_AGENT = "NewsScope-RSSHub-Collector/1.0 (+RSS/Atom reader)"
 BLOCK_TAGS = {"br", "p", "div", "li", "tr", "h1", "h2", "h3"}
@@ -230,6 +234,32 @@ def stable_entry_key(item_id: str, link: str, title: str, published: str) -> str
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
+def publication_timestamp(value: str, fallback: int) -> int:
+    text = value.strip()
+    if not text:
+        return fallback
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        try:
+            timestamp = float(text)
+            if timestamp > 253402300799:
+                timestamp /= 1000
+            result = int(timestamp)
+            return result if 0 < result <= 253402300799 else fallback
+        except (ValueError, OverflowError):
+            return fallback
+    try:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = parsedate_to_datetime(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        result = int(parsed.timestamp())
+        return result if 0 < result <= 253402300799 else fallback
+    except (TypeError, ValueError, OverflowError, OSError):
+        return fallback
+
+
 def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
     try:
         document = json.loads(raw.decode("utf-8-sig"))
@@ -265,6 +295,7 @@ def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
                 "title": title,
                 "body": body,
                 "link": link,
+                "published": published,
             })
         return feed_title, parsed
 
@@ -292,6 +323,7 @@ def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
                 "title": title,
                 "body": body,
                 "link": link,
+                "published": published,
             })
         return feed_title, parsed
 
@@ -333,7 +365,7 @@ def extract_feed(xml_bytes: bytes) -> tuple[str, list[dict[str, str]]]:
         if not title:
             continue
         key = stable_entry_key(item_id, link, title, published)
-        parsed.append({"key": key, "title": title, "body": body, "link": link})
+        parsed.append({"key": key, "title": title, "body": body, "link": link, "published": published})
     return feed_title, parsed
 
 
@@ -519,22 +551,29 @@ def http_request(url: str, *, data: Optional[bytes] = None) -> bytes:
         headers["Content-Type"] = "application/json"
     request = Request(url, data=data, headers=headers, method=method)
     last_error: Optional[Exception] = None
-    for attempt in range(4):
-        try:
-            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                body = response.read(MAX_FEED_BYTES + 1)
-                if len(body) > MAX_FEED_BYTES:
-                    raise ValueError("响应超过 12 MiB 限制")
-                return body
-        except HTTPError as exc:
-            last_error = RuntimeError(f"HTTP {exc.code}: {exc.reason}")
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
-                break
-        except OSError as exc:
-            last_error = RuntimeError(str(exc))
-            if attempt == 3:
-                break
-        time.sleep(min(2 ** attempt, 8))
+    if data is not None:
+        SUBMISSION_SLOTS.acquire()
+    try:
+        for attempt in range(4):
+            try:
+                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                    body = response.read(MAX_FEED_BYTES + 1)
+                    if len(body) > MAX_FEED_BYTES:
+                        raise ValueError("响应超过 12 MiB 限制")
+                    return body
+            except HTTPError as exc:
+                detail = exc.read(2048).decode("utf-8", errors="replace").strip()
+                last_error = RuntimeError(f"HTTP {exc.code}: {detail or exc.reason}")
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                    break
+            except OSError as exc:
+                last_error = RuntimeError(str(exc))
+                if attempt == 3:
+                    break
+            time.sleep(min(2 ** attempt, 8))
+    finally:
+        if data is not None:
+            SUBMISSION_SLOTS.release()
     raise RuntimeError(str(last_error or "请求失败"))
 
 
@@ -605,11 +644,12 @@ def poll_subscription(sub: dict, newscope_url: str, config: Optional[ConfigStore
         articles: list[dict] = []
         keys: list[str] = []
         for entry in pending:
+            published_at = publication_timestamp(entry.get("published", ""), result["checked_at"])
             article = {
                 "source": source,
                 "title": entry["title"],
                 "body": entry["body"],
-                "collected_at": int(time.time()),
+                "collected_at": published_at,
             }
             original_url = safe_article_url(entry["link"], sub["url"])
             if original_url:
@@ -642,7 +682,7 @@ def poll_subscription(sub: dict, newscope_url: str, config: Optional[ConfigStore
             "duplicates": duplicate_count,
             "rejected": rejected,
             "error": "" if rejected == 0 else (
-                f"有 {rejected} 条资讯未能提交（正文过大或服务拒收）"
+                f"有 {rejected} 条资讯未能确认入队或被服务拒收"
                 + (f"；提交错误：{'；'.join(submit_errors)}" if submit_errors else "")
             )[:500],
         })
@@ -850,7 +890,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="RSSHub adapter for NewsScope")
     parser.add_argument("--host", default=os.environ.get("RSSHUB_PANEL_HOST", DEFAULT_PANEL_HOST), help="监听地址；容器模式支持 0.0.0.0")
     parser.add_argument("--port", type=int, default=int(os.environ.get("RSSHUB_PANEL_PORT", DEFAULT_PANEL_PORT)), help="适配插件端口，默认 8885")
-    parser.add_argument("--interval", type=int, default=int(os.environ.get("RSSHUB_POLL_INTERVAL", DEFAULT_INTERVAL)), help="RSS 轮询间隔秒数，默认 300")
+    parser.add_argument("--interval", type=int, default=int(os.environ.get("RSSHUB_POLL_INTERVAL", DEFAULT_INTERVAL)), help="RSS 轮询间隔秒数，默认 60")
     parser.add_argument("--workers", type=int, default=int(os.environ.get("RSSHUB_POLL_WORKERS", DEFAULT_WORKERS)), help="并发订阅数，默认 4")
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("RSSHUB_CONFIG", default_config_path())), help="配置文件路径")
     args = parser.parse_args()

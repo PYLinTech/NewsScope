@@ -17,14 +17,15 @@ NewsScope 是一个用于采集、分析和查询资讯的 Go 服务。它接收
 ## 架构
 
 ```text
-独立采集器
-        │ POST /ingest/normal 或 /ingest/vip
-        ▼
-NewsScope 采集监听器 ──► SQLite ──► 分析工作器 ──► 兼容 OpenAI 的 API
-                                  │
-                 ┌────────────────┴────────────────┐
-                 ▼                                 ▼
-       normal 查询监听器                  vip 查询监听器
+采集器 ──► 采集 API ──► SQLite 采集队列 ──► 8 个采集处理工作器
+                                           │
+兼容 OpenAI 的 API ◄── 分析工作器 ◄── SQLite 分析队列
+                                           │
+                                  重复审查与资讯存储
+                                           │
+                         ┌─────────────────┴─────────────────┐
+                         ▼                                   ▼
+                normal 查询监听器                    vip 查询监听器
 ```
 
 | 监听器 | 默认地址 | 端点 |
@@ -110,7 +111,7 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 
 `source`、`title`、`body` 和 `collected_at` 为必填字段。`original_url` 可省略或为空。`collected_at` 是采集器取得该资讯的时间，使用秒级 Unix 时间戳整数；它不是资讯正文所述事件的发生时间。NewsScope 不提取或单独处理资讯事实时间，相关信息保留在提交的标题和正文中。
 
-每个请求可包含 1 至 500 条资讯，正文请求大小上限为 10 MiB。JSON 中不接受未定义字段。采集器通过选择端点来决定受众，提交内容中不包含受众字段。采集器只提交来源和资讯内容等原始数据；内部 ID 由 NewsScope 分配，资讯分析在写入后异步进行。
+每个请求可包含 1 至 500 条资讯，正文请求大小上限为 10 MiB。JSON 中不接受未定义字段。采集器通过选择端点来决定受众，提交内容中不包含受众字段。采集器只提交来源和资讯内容等原始数据；内部 ID 由 NewsScope 分配。采集监听器先将有效提交持久化到 SQLite，再返回确认；重复审查和后续分析在后台执行。采集队列由 8 个工作器处理，分析工作器数量则由 `ANALYSIS_WORKERS` 单独配置。
 
 响应示例：
 
@@ -118,15 +119,16 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 {
   "version": 1,
   "accepted": 1,
+  "queued": 1,
   "duplicates": 0,
   "rejected": 0,
   "results": [
-    {"status": "accepted", "article_id": 8123}
+    {"status": "accepted"}
   ]
 }
 ```
 
-`accepted` 包含新写入的资讯及已确认为重复的资讯；`duplicates` 是 `accepted` 的子集。两者都不表示模型分析已完成。每条结果的状态为 `accepted`、`duplicate` 或 `rejected`；拒收结果可包含原因。判定为重复时，结果可包含已有资讯的 `article_id`。
+`accepted` 表示资讯已持久化入队或已确认为重复；`queued` 是已接收入队、等待后台处理的数量，`duplicates` 是已存在资讯的数量。服务会在队列事务提交后响应，因此 `accepted` 不表示资讯已通过重复审查或已写入正式资讯表；后台重复审查仍可能拒绝某条入队资讯。每条结果的状态为 `accepted`、`duplicate` 或 `rejected`；拒收结果可包含原因。判定为重复时，结果可能包含已有资讯的 `article_id`。
 
 ## 查询接口
 

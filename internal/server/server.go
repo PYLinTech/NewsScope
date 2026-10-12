@@ -19,7 +19,7 @@ import (
 	"newsscope/internal/storage"
 )
 
-const maxConcurrentIngestArticles = 8
+const maxConcurrentIngestRequests = 256
 
 type API struct {
 	Store        *storage.Store
@@ -43,7 +43,7 @@ type hideRequest struct {
 func New(st *storage.Store, c config.Config, l *log.Logger, model *analyzer.Client) *API {
 	return &API{
 		Store: st, Config: c, Logger: l, Model: model,
-		ingestSlots: make(chan struct{}, maxConcurrentIngestArticles),
+		ingestSlots: make(chan struct{}, maxConcurrentIngestRequests),
 	}
 }
 func (a *API) CollectorHandler() http.Handler {
@@ -147,6 +147,12 @@ func (a *API) detail(w http.ResponseWriter, r *http.Request, audience string) {
 }
 
 func (a *API) ingest(w http.ResponseWriter, r *http.Request, audience string) {
+	select {
+	case a.ingestSlots <- struct{}{}:
+		defer func() { <-a.ingestSlots }()
+	case <-r.Context().Done():
+		return
+	}
 	var req ingestRequest
 	if err := decodeJSON(w, r, 10<<20, &req); err != nil {
 		invalid(w)
@@ -160,85 +166,41 @@ func (a *API) ingest(w http.ResponseWriter, r *http.Request, audience string) {
 		invalid(w)
 		return
 	}
+	articles := make([]storage.ArticleInput, len(req.Articles))
 	results := make([]storage.IngestResult, len(req.Articles))
-	workCtx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	var errOnce sync.Once
-	var firstErr error
-	workerCount := min(len(req.Articles), maxConcurrentIngestArticles)
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range jobs {
-				if workCtx.Err() != nil {
-					return
-				}
-				var article storage.ArticleInput
-				var result storage.IngestResult
-				if err := decodeArticle(req.Articles[index], &article); err != nil {
-					result = storage.IngestResult{Status: "rejected", Reason: "invalid_article"}
-				} else {
-					var valid bool
-					article, valid = storage.NormalizeArticle(article)
-					if !valid {
-						result = storage.IngestResult{Status: "rejected", Reason: "invalid_article"}
-					} else {
-						if a.ingestSlots != nil {
-							select {
-							case a.ingestSlots <- struct{}{}:
-							case <-workCtx.Done():
-								return
-							}
-						}
-						var err error
-						result, err = a.ingestArticle(workCtx, article, audience)
-						if a.ingestSlots != nil {
-							<-a.ingestSlots
-						}
-						if err != nil {
-							errOnce.Do(func() {
-								firstErr = err
-								cancel()
-							})
-							return
-						}
-					}
-				}
-				results[index] = result
-			}
-		}()
-	}
-
-	for index := range req.Articles {
-		select {
-		case jobs <- index:
-		case <-workCtx.Done():
-			break
+	validIndexes := make([]int, 0, len(req.Articles))
+	for index, raw := range req.Articles {
+		if err := decodeArticle(raw, &articles[index]); err != nil {
+			results[index] = storage.IngestResult{Status: "rejected", Reason: "invalid_article"}
+			continue
 		}
-		if workCtx.Err() != nil {
-			break
+		if _, valid := storage.NormalizeArticle(articles[index]); !valid {
+			results[index] = storage.IngestResult{Status: "rejected", Reason: "invalid_article"}
+			continue
 		}
+		validIndexes = append(validIndexes, index)
 	}
-	close(jobs)
-	wg.Wait()
-	if firstErr != nil {
-		a.fail(w, firstErr)
+	validArticles := make([]storage.ArticleInput, 0, len(validIndexes))
+	for _, index := range validIndexes {
+		validArticles = append(validArticles, articles[index])
+	}
+	queuedResults, err := a.Store.EnqueueIngestBatch(r.Context(), validArticles, audience)
+	if err != nil {
+		a.fail(w, err)
 		return
 	}
-	if r.Context().Err() != nil {
-		return
+	for index, result := range queuedResults {
+		results[validIndexes[index]] = result
 	}
 
-	// accepted counts new records and confirmed duplicates; duplicates is a
-	// subset of accepted, while rejected is disjoint.
-	accepted, duplicates, rejected := 0, 0, 0
+	// Acceptance means durable queue ownership; duplicate review and analysis
+	// continue asynchronously after this response.
+	accepted, queued, duplicates, rejected := 0, 0, 0, 0
 	for _, res := range results {
 		switch res.Status {
 		case "accepted":
 			accepted++
+			queued++
 		case "duplicate":
 			accepted++
 			duplicates++
@@ -246,7 +208,7 @@ func (a *API) ingest(w http.ResponseWriter, r *http.Request, audience string) {
 			rejected++
 		}
 	}
-	writeJSON(w, 200, map[string]any{"version": 1, "accepted": accepted, "duplicates": duplicates, "rejected": rejected, "results": results})
+	writeJSON(w, 200, map[string]any{"version": 1, "accepted": accepted, "queued": queued, "duplicates": duplicates, "rejected": rejected, "results": results})
 }
 
 // ingestArticle performs model review without holding an audience-wide lock.
@@ -260,6 +222,11 @@ func (a *API) ingestArticle(ctx context.Context, article storage.ArticleInput, a
 		revision = &a.vipRev
 	}
 	for {
+		if id, duplicate, err := a.Store.FindExactArticle(ctx, article, audience); err != nil {
+			return storage.IngestResult{}, err
+		} else if duplicate {
+			return storage.IngestResult{Status: "duplicate", ArticleID: id}, nil
+		}
 		commitLock.Lock()
 		observedRevision := *revision
 		commitLock.Unlock()
@@ -300,6 +267,11 @@ func (a *API) ingestArticle(ctx context.Context, article storage.ArticleInput, a
 		commitLock.Unlock()
 		return result, err
 	}
+}
+
+// ProcessQueuedArticle runs duplicate review for one already acknowledged job.
+func (a *API) ProcessQueuedArticle(ctx context.Context, article storage.ArticleInput, audience string) (storage.IngestResult, error) {
+	return a.ingestArticle(ctx, article, audience)
 }
 
 func (a *API) hide(w http.ResponseWriter, r *http.Request) {

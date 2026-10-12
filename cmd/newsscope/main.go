@@ -21,6 +21,8 @@ import (
 	"newsscope/internal/storage"
 )
 
+const ingestWorkerCount = 8
+
 func main() {
 	logger := log.New(os.Stdout, "newsscope ", log.LstdFlags|log.LUTC|log.Lmicroseconds)
 	if err := run(logger); err != nil {
@@ -63,6 +65,13 @@ func run(logger *log.Logger) error {
 		}()
 	}
 	var workers sync.WaitGroup
+	for i := 0; i < ingestWorkerCount; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ingestWorker(ctx, store, api, logger)
+		}()
+	}
 	for i := 0; i < cfg.Workers; i++ {
 		workers.Add(1)
 		go func() {
@@ -86,6 +95,62 @@ func run(logger *log.Logger) error {
 	}
 	workers.Wait()
 	return serverErr
+}
+
+func ingestWorker(ctx context.Context, store *storage.Store, api *server.API, logger *log.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		job, ok, err := store.ClaimIngest(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Printf("claim ingestion job: %v", err)
+			wait(ctx, time.Second)
+			continue
+		}
+		if !ok {
+			store.WaitForIngest(ctx, 5*time.Second)
+			continue
+		}
+		result, err := api.ProcessQueuedArticle(ctx, job.Article, job.Audience)
+		if err != nil {
+			if ctx.Err() != nil {
+				releaseIngestOnShutdown(store, job, logger)
+				return
+			}
+			if retryErr := store.RetryIngest(ctx, job, err); retryErr != nil {
+				logger.Printf("retry ingestion job %d: %v", job.ID, retryErr)
+			}
+			logger.Printf("ingestion job %d failed (attempt %d), queued for retry: %v", job.ID, job.Attempts, err)
+			continue
+		}
+		if err := store.CompleteIngest(ctx, job); err != nil {
+			if ctx.Err() != nil {
+				releaseIngestOnShutdown(store, job, logger)
+				return
+			}
+			if retryErr := store.RetryIngest(ctx, job, err); retryErr != nil {
+				logger.Printf("retry ingestion job %d after completion error: %v", job.ID, retryErr)
+			}
+			continue
+		}
+		if result.Status == "rejected" {
+			logger.Printf("ingestion job %d was rejected after queueing: %s", job.ID, result.Reason)
+		}
+	}
+}
+
+func releaseIngestOnShutdown(store *storage.Store, job storage.IngestJob, logger *log.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := store.ReleaseIngest(ctx, job); err != nil {
+		logger.Printf("release ingestion job %d: %v", job.ID, err)
+	}
 }
 
 func maintainSQLite(ctx context.Context, store *storage.Store, logger *log.Logger) {
