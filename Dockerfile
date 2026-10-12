@@ -1,6 +1,8 @@
 ARG RSSHUB_IMAGE=ghcr.io/diygod/rsshub:chromium-bundled-d55daa06c1340db6fa9cc5f865f627748eb5b346
 
 FROM golang:1.27-bookworm AS newsscope-build
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

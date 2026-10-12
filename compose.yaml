@@ -5,6 +5,7 @@ services:
       context: .
       args:
         RSSHUB_IMAGE: ${RSSHUB_IMAGE:-ghcr.io/diygod/rsshub:chromium-bundled-d55daa06c1340db6fa9cc5f865f627748eb5b346}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     restart: unless-stopped
     init: true
     env_file:
