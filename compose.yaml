@@ -1,0 +1,40 @@
+services:
+  newsscope:
+    image: newsscope-rsshub:local
+    build:
+      context: .
+      args:
+        RSSHUB_IMAGE: ${RSSHUB_IMAGE:-ghcr.io/diygod/rsshub:chromium-bundled-d55daa06c1340db6fa9cc5f865f627748eb5b346}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      PORT: "1200"
+      CACHE_TYPE: redis
+      CACHE_EXPIRE: ${RSSHUB_CACHE_EXPIRE:-300}
+      CACHE_CONTENT_EXPIRE: ${RSSHUB_CONTENT_CACHE_EXPIRE:-3600}
+      RSSHUB_REDIS_MAXMEMORY: ${RSSHUB_REDIS_MAXMEMORY:-256mb}
+      REDIS_URL: redis://127.0.0.1:6379/
+      NORMAL_ADDR: 0.0.0.0:8887
+      VIP_ADDR: 0.0.0.0:8888
+      DATABASE_PATH: /data/newsscope/newsscope.db
+      XDG_CONFIG_HOME: /data/config
+      RSSHUB_CONFIG: /data/rsshub/config.json
+      RSSHUB_PANEL_HOST: 0.0.0.0
+      RSSHUB_PANEL_PORT: "8885"
+      RSSHUB_PANEL_CONTAINER_MODE: "1"
+      RSSHUB_POLL_INTERVAL: ${RSSHUB_POLL_INTERVAL:-300}
+      RSSHUB_POLL_WORKERS: ${RSSHUB_POLL_WORKERS:-4}
+    ports:
+      - "${RSSHUB_BIND:-127.0.0.1}:${RSSHUB_PORT:-1200}:1200"
+      - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8885}:8885"
+      - "${COLLECTOR_BIND:-127.0.0.1}:${COLLECTOR_HOST_PORT:-8886}:18886"
+      - "${NORMAL_BIND:-127.0.0.1}:${NORMAL_HOST_PORT:-8887}:8887"
+      - "${VIP_BIND:-127.0.0.1}:${VIP_HOST_PORT:-8888}:8888"
+    volumes:
+      - newsscope-data:/data
+    stop_grace_period: 45s
+
+volumes:
+  newsscope-data:

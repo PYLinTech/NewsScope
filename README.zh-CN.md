@@ -62,6 +62,8 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 
 服务从当前工作目录加载 `.env`。若 SQLite 文件所在目录不存在，服务会创建该目录。默认数据库路径为 `./data/newsscope.db`。
 
+如需将官方 RSSHub、NewsScope 服务和 RSSHub 适配插件打包到单个 Docker 容器，请参阅[单容器部署说明](docker/README.zh-CN.md)。
+
 ## 配置
 
 | 变量 | 默认值 | 说明 |

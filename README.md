@@ -62,6 +62,8 @@ Normal and VIP are independent audiences. Ingesting into one does not copy the a
 
 The service loads `.env` from the current working directory. It creates the parent directory for the configured SQLite database when needed. The default database path is `./data/newsscope.db`.
 
+To package official RSSHub, NewsScope, and the RSSHub adapter plugin into one Docker container, see the [single-container deployment guide](docker/README.zh-CN.md).
+
 ## Configuration
 
 | Variable | Default | Description |

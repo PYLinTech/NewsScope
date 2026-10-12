@@ -115,14 +115,16 @@ def validate_http_url(raw: str, *, allow_path: bool = True) -> str:
 
 def validate_loopback_host(host: str) -> str:
     value = host.strip()
+    if value == "0.0.0.0" and os.environ.get("RSSHUB_PANEL_CONTAINER_MODE") == "1":
+        return value
     if value.lower() == "localhost":
         return value
     try:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
-        raise ValueError("管理面板只能绑定 IPv4 本机回环地址或 localhost") from exc
+        raise ValueError("RSSHub 适配插件只能绑定 IPv4 本机回环地址或容器模式下的 0.0.0.0") from exc
     if address.version != 4 or not address.is_loopback:
-        raise ValueError("管理面板只能绑定本机回环地址")
+        raise ValueError("RSSHub 适配插件只能绑定本机回环地址")
     return value
 
 
@@ -699,10 +701,10 @@ def json_bytes(value: object) -> bytes:
 
 def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "NewsScopeRSSHubPanel/1.0"
+        server_version = "NewsScopeRSSHubAdapter/1.0"
 
         def log_message(self, fmt: str, *args) -> None:
-            sys.stderr.write("[rsshub-panel] " + (fmt % args) + "\n")
+            sys.stderr.write("[rsshub-adapter] " + (fmt % args) + "\n")
 
         def _send(self, status_code: int, content_type: str, body: bytes) -> None:
             self.send_response(status_code)
@@ -719,13 +721,16 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
             self._send(status_code, "application/json; charset=utf-8", json_bytes(value))
 
         def _local_request(self) -> bool:
+            container_mode = os.environ.get("RSSHUB_PANEL_CONTAINER_MODE") == "1"
             try:
                 host_url = urlparse("//" + self.headers.get("Host", ""))
                 host = (host_url.hostname or "").lower()
                 host_port = host_url.port or 80
             except ValueError:
                 return False
-            if host not in {"localhost", "127.0.0.1"} or host_port != self.server.server_port:
+            if host not in {"localhost", "127.0.0.1"}:
+                return False
+            if not container_mode and host_port != self.server.server_port:
                 return False
             origin = self.headers.get("Origin")
             if origin:
@@ -738,7 +743,7 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
                 if (
                     parsed.scheme != "http"
                     or origin_host != host
-                    or origin_port != self.server.server_port
+                    or origin_port != host_port
                 ):
                     return False
             return True
@@ -842,9 +847,9 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="RSSHub subscriptions for NewsScope")
-    parser.add_argument("--host", default=os.environ.get("RSSHUB_PANEL_HOST", DEFAULT_PANEL_HOST), help="本机回环监听地址")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("RSSHUB_PANEL_PORT", DEFAULT_PANEL_PORT)), help="管理面板端口，默认 8885")
+    parser = argparse.ArgumentParser(description="RSSHub adapter for NewsScope")
+    parser.add_argument("--host", default=os.environ.get("RSSHUB_PANEL_HOST", DEFAULT_PANEL_HOST), help="监听地址；容器模式支持 0.0.0.0")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("RSSHUB_PANEL_PORT", DEFAULT_PANEL_PORT)), help="适配插件端口，默认 8885")
     parser.add_argument("--interval", type=int, default=int(os.environ.get("RSSHUB_POLL_INTERVAL", DEFAULT_INTERVAL)), help="RSS 轮询间隔秒数，默认 300")
     parser.add_argument("--workers", type=int, default=int(os.environ.get("RSSHUB_POLL_WORKERS", DEFAULT_WORKERS)), help="并发订阅数，默认 4")
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("RSSHUB_CONFIG", default_config_path())), help="配置文件路径")
@@ -866,7 +871,7 @@ def main() -> int:
     server = ThreadingHTTPServer((host, args.port), make_handler(config, status, Path(__file__).with_name("index.html")))
     server.daemon_threads = True
     poller.start()
-    print(f"RSSHub 管理面板：http://{host}:{args.port}")
+    print(f"RSSHub 适配插件：http://{host}:{args.port}")
     print(f"配置文件：{args.config.expanduser()}")
     try:
         server.serve_forever(poll_interval=0.5)
