@@ -36,8 +36,10 @@
     }
     *, *::before, *::after { box-sizing: border-box; }
     body { min-width: 320px; margin: 0; color: var(--ink); background: var(--page); }
-    button, input, select { font: inherit; }
+    button, input, select { margin: 0; font: inherit; }
+    button, input, select { -webkit-appearance: none; appearance: none; }
     button { color: inherit; }
+    form { margin: 0; }
     button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
       outline: 3px solid rgb(36 87 166 / 28%); outline-offset: 2px;
     }
@@ -51,13 +53,13 @@
     .topbar-meta { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
     .local-dot { width: 8px; height: 8px; border-radius: 50%; background: #2f9b69; box-shadow: 0 0 0 3px var(--success-soft); }
     main { padding: 34px 0 48px; }
-    .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 25px; }
+    .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 25px; }
     .heading-actions { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
     .eyebrow { margin: 0 0 6px; color: var(--brand); font-size: 11px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
     h1, h2, h3, p { margin-top: 0; }
     h1 { margin-bottom: 7px; font-size: clamp(25px, 3vw, 31px); line-height: 1.2; letter-spacing: -.035em; }
     .lede { max-width: 640px; margin: 0; color: var(--muted); font-size: 14px; }
-    .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 8px 13px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink-soft); font-size: 13px; font-weight: 650; line-height: 1.2; cursor: pointer; transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease; }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 8px 13px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink-soft); font-size: 13px; font-weight: 650; line-height: 1.2; text-align: center; white-space: nowrap; cursor: pointer; transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease; }
     .button:hover { border-color: #aab7c7; background: #f8fafc; }
     .button:active { background: #eef2f7; }
     .button-primary { border-color: var(--brand); color: #fff; background: var(--brand); box-shadow: 0 1px 2px rgb(36 87 166 / 18%); }
@@ -67,6 +69,7 @@
     .button-danger { color: var(--danger); }
     .button-danger:hover { border-color: #f0c5c1; color: #941b13; background: var(--danger-soft); }
     .button-icon { width: 36px; min-width: 36px; min-height: 36px; padding: 0; font-size: 17px; }
+    .button:disabled { opacity: .58; cursor: wait; }
     .overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
     .stat-card { display: flex; align-items: center; gap: 13px; min-height: 86px; padding: 17px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
     .stat-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 auto; border-radius: 9px; color: var(--brand); background: var(--brand-soft); font-size: 19px; }
@@ -81,15 +84,35 @@
     .panel-description { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .panel-body { padding: 18px 19px; }
     .config-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .38fr) auto; align-items: end; gap: 12px; }
-    .form-grid { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(260px, 1.65fr) minmax(150px, .65fr); gap: 13px; }
+    .form-grid { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(260px, 1.65fr) minmax(150px, .65fr); align-items: end; gap: 13px; }
     .field { display: grid; align-content: start; gap: 6px; min-width: 0; }
-    .field-label { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
+    .field-label { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 5px; min-height: 19px; color: var(--ink-soft); font-size: 12px; font-weight: 650; line-height: 19px; }
     .field-hint { color: var(--subtle); font-size: 11px; font-weight: 450; }
-    .control { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); background: #fff; transition: border-color .15s ease, box-shadow .15s ease; }
+    .control { display: block; width: 100%; height: 40px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); background-color: #fff; font-size: 13px; line-height: 22px; transition: border-color .15s ease, box-shadow .15s ease; }
     .control:hover { border-color: #9eacbd; }
     .control:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px rgb(36 87 166 / 12%); }
     .control::placeholder { color: #9aa7b6; }
-    .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .control:disabled { color: var(--muted); background-color: var(--surface-muted); cursor: not-allowed; }
+    select.control { padding-right: 34px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2368788d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; background-size: 16px; cursor: pointer; }
+    input[type="number"] { -moz-appearance: textfield; }
+    input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; }
+    input[type="search"]::-webkit-search-decoration, input[type="search"]::-webkit-search-cancel-button { display: none; -webkit-appearance: none; }
+    input:-webkit-autofill { -webkit-text-fill-color: var(--ink); box-shadow: 0 0 0 1000px #fff inset; }
+    .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .feed-preview { margin-top: 16px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+    .preview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+    .preview-heading h4 { margin: 0; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+    .preview-heading p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+    .preview-items { display: grid; gap: 0; max-height: 520px; overflow: auto; }
+    .preview-item { padding: 14px 15px; border-top: 1px solid var(--line); }
+    .preview-item:first-child { border-top: 0; }
+    .preview-item-title { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+    .preview-item-title a { color: var(--brand); text-decoration: none; }
+    .preview-item-title a:hover { text-decoration: underline; }
+    .preview-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+    .preview-body { margin: 9px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .preview-empty { padding: 24px 16px; color: var(--muted); font-size: 12px; text-align: center; }
+    .preview-empty.error { color: var(--danger); background: var(--danger-soft); }
     .inline-message { min-height: 0; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
     .inline-message:empty { display: none; }
     .inline-message.error { color: var(--danger); }
@@ -97,7 +120,7 @@
     .subscription-toolbar { display: flex; align-items: center; gap: 10px; }
     .search-wrap { position: relative; width: min(240px, 32vw); }
     .search-wrap .ri-search-line { position: absolute; left: 10px; top: 50%; color: var(--subtle); font-size: 16px; transform: translateY(-50%); pointer-events: none; }
-    .search-input { min-height: 36px; padding-left: 33px; font-size: 12px; }
+    .search-input { height: 36px; min-height: 36px; padding: 6px 10px 6px 33px; font-size: 12px; line-height: 22px; }
     .count { color: var(--muted); font-size: 12px; white-space: nowrap; }
     .subscription-form { padding: 18px 19px; border-bottom: 1px solid var(--line); background: #fbfcfe; }
     .form-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
@@ -157,7 +180,9 @@
       .search-wrap { width: auto; flex: 1; }
       .subscription-form { padding: 15px 14px; }
       .form-heading { margin-bottom: 12px; }
-      .form-actions .button { flex: 1; }
+      .form-actions { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }
+      .form-actions .button { width: 100%; }
+      .form-actions .button-primary { grid-column: 1 / -1; }
       .table-head { display: none; }
       .subscription-row { grid-template-columns: minmax(0, 1fr) auto; gap: 9px 12px; padding: 14px; }
       .source-cell { grid-column: 1 / -1; }
@@ -209,8 +234,8 @@
             <input id="newsscopeUrl" class="control" type="url" inputmode="url" required autocomplete="url" placeholder="http://127.0.0.1:8886">
           </label>
           <label class="field" for="pollInterval">
-            <span class="field-label">逐行扫描间隔 <span class="field-hint">秒 · 至少 10 秒，每次轮到一个订阅</span></span>
-            <input id="pollInterval" class="control" type="number" inputmode="numeric" min="10" step="1" required>
+            <span class="field-label">逐行扫描间隔 <span class="field-hint">秒 · 至少 1 秒，每次轮到一个订阅</span></span>
+            <input id="pollInterval" class="control" type="number" inputmode="numeric" min="1" step="1" required>
           </label>
           <button class="button button-primary" type="submit"><i class="ri-save-line" aria-hidden="true"></i>保存设置</button>
         </form>
@@ -267,8 +292,16 @@
           </label>
         </div>
         <p id="subscriptionMessage" class="inline-message" role="status" aria-live="polite"></p>
+        <section id="feedPreview" class="feed-preview" aria-label="订阅内容预览" hidden>
+          <header class="preview-heading">
+            <div><h4 id="previewFeedTitle">订阅预览</h4><p id="previewCount" role="status" aria-live="polite"></p></div>
+            <button id="closePreviewButton" class="button button-quiet button-icon" type="button" aria-label="关闭预览"><i class="ri-close-line" aria-hidden="true"></i></button>
+          </header>
+          <div id="previewItems" class="preview-items"></div>
+        </section>
         <div class="form-actions">
           <button id="cancelFormButton" class="button" type="button">取消</button>
+          <button id="previewButton" class="button" type="button"><i class="ri-eye-line" aria-hidden="true"></i>预览订阅</button>
           <button class="button button-primary" type="submit"><i class="ri-check-line" aria-hidden="true"></i>保存订阅</button>
         </div>
       </form>
@@ -277,7 +310,7 @@
       <div id="subscriptionList" role="list" aria-live="polite"></div>
     </section>
 
-    <p class="privacy-note"><i class="ri-shield-check-line" aria-hidden="true"></i><span>插件管理界面仅供本机访问。适配器按配置的逐行扫描间隔轮换检查订阅；响应较慢时会受并发上限约束。资讯优先按来源标识或文章链接去重，缺少稳定标识时使用标题和发布时间。采集时间记录为实际抓取时刻。</span></p>
+    <p class="privacy-note"><i class="ri-shield-check-line" aria-hidden="true"></i><span>插件管理界面仅供本机访问。适配器按配置的逐行扫描间隔轮换检查订阅；响应较慢时会受并发上限约束。资讯优先按来源标识或文章链接去重，缺少稳定标识时使用标题和发布时间。资讯时间优先采用文章发布时间，其次使用 RSS 频道时间，均不可用时才使用采集时刻。</span></p>
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden><i class="ri-checkbox-circle-line" aria-hidden="true"></i><span id="toastText"></span></div>
@@ -291,6 +324,7 @@
     let refreshController = null;
     let refreshTimer = null;
     let toastTimer = null;
+    let previewController = null;
 
     function setMessage(element, text, kind = '') {
       element.textContent = text;
@@ -363,6 +397,92 @@
       badge.append(icon(iconName));
       box.append(badge, element('p', 'empty-title', title), element('p', 'empty-copy', detail));
       return box;
+    }
+
+    function resetPreviewButton() {
+      const button = $('#previewButton');
+      button.disabled = false;
+      button.replaceChildren(icon('ri-eye-line'), document.createTextNode('预览订阅'));
+    }
+
+    function clearPreview() {
+      previewController?.abort();
+      previewController = null;
+      $('#feedPreview').hidden = true;
+      $('#previewFeedTitle').textContent = '订阅预览';
+      $('#previewCount').textContent = '';
+      $('#previewItems').replaceChildren();
+      resetPreviewButton();
+    }
+
+    function renderPreview(data) {
+      const panel = $('#feedPreview');
+      const items = $('#previewItems');
+      $('#previewFeedTitle').textContent = data.feed_title || $('#subscriptionUrl').value.trim();
+      $('#previewCount').textContent = `共 ${data.total} 条，展示前 ${data.items.length} 条`;
+      items.replaceChildren();
+      if (!data.items.length) {
+        items.append(element('div', 'preview-empty', '订阅可以读取，但没有可预览的文章条目。'));
+      }
+      for (const item of data.items) {
+        const card = element('article', 'preview-item');
+        const heading = element('h5', 'preview-item-title');
+        if (item.link) {
+          const link = element('a', '', item.title || '无标题');
+          link.href = item.link;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          heading.append(link);
+        } else {
+          heading.textContent = item.title || '无标题';
+        }
+        const meta = element('div', 'preview-meta');
+        meta.append(
+          element('span', '', item.published_at ? localTime(item.published_at) : '未提供发布时间'),
+          element('span', '', item.time_source || '时间未知'),
+        );
+        const body = element('p', 'preview-body', item.body || '订阅条目未提供正文。');
+        if (item.body_truncated) body.append(document.createTextNode('\n（预览内容已截断）'));
+        card.append(heading, meta, body);
+        items.append(card);
+      }
+      panel.hidden = false;
+    }
+
+    async function previewSubscription() {
+      const input = $('#subscriptionUrl');
+      if (!input.reportValidity()) return;
+      clearPreview();
+      setMessage($('#subscriptionMessage'), '');
+      const button = $('#previewButton');
+      button.disabled = true;
+      button.replaceChildren(icon('ri-loader-4-line'), document.createTextNode('正在获取…'));
+      const controller = new AbortController();
+      previewController = controller;
+      const panel = $('#feedPreview');
+      $('#previewFeedTitle').textContent = '正在读取订阅';
+      $('#previewCount').textContent = '只读取 RSS 内容，不会保存订阅或提交资讯';
+      $('#previewItems').replaceChildren(element('div', 'preview-empty', '正在请求订阅源…'));
+      panel.hidden = false;
+      try {
+        const data = await api('/api/preview', {
+          method: 'POST',
+          body: JSON.stringify({ url: input.value.trim() }),
+          signal: controller.signal,
+        });
+        if (previewController === controller) renderPreview(data);
+      } catch (error) {
+        if (error.name !== 'AbortError' && previewController === controller) {
+          $('#previewFeedTitle').textContent = '预览失败';
+          $('#previewCount').textContent = error.message;
+          $('#previewItems').replaceChildren(element('div', 'preview-empty error', '请检查订阅地址或稍后重试。'));
+        }
+      } finally {
+        if (previewController === controller) {
+          previewController = null;
+          resetPreviewButton();
+        }
+      }
     }
 
     function renderSubscriptions(subscriptions) {
@@ -468,6 +588,7 @@
     }
 
     function closeForm() {
+      clearPreview();
       form.reset();
       $('#subscriptionId').value = '';
       $('#formTitle').textContent = '添加订阅';
@@ -499,6 +620,7 @@
     }
 
     function openForm(sub = null) {
+      clearPreview();
       form.reset();
       $('#subscriptionId').value = sub?.id == null ? '' : String(sub.id);
       $('#subscriptionName').value = sub?.name || '';
@@ -529,6 +651,14 @@
     $('#cancelButton').addEventListener('click', closeForm);
     $('#cancelFormButton').addEventListener('click', closeForm);
     $('#refreshButton').addEventListener('click', () => refresh());
+    $('#previewButton').addEventListener('click', previewSubscription);
+    $('#closePreviewButton').addEventListener('click', clearPreview);
+    $('#subscriptionUrl').addEventListener('input', () => {
+      if (!$('#feedPreview').hidden) {
+        clearPreview();
+        setMessage($('#subscriptionMessage'), '订阅地址已修改，请重新预览。');
+      }
+    });
     $('#toggleServiceButton').addEventListener('click', () => {
       setTargetSettingsOpen($('#targetSettings').hidden);
     });

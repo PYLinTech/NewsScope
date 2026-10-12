@@ -42,6 +42,7 @@ DEFAULT_INTERVAL = 10
 DEFAULT_WORKERS = 4
 REQUEST_TIMEOUT_SECONDS = 25
 MAX_FEED_BYTES = 12 * 1024 * 1024
+MAX_PREVIEW_ITEMS = 20
 MAX_BATCH_ITEMS = 500
 MAX_BATCH_BYTES = 9 * 1024 * 1024
 MAX_ARTICLE_BYTES = 2 * 1024 * 1024
@@ -234,19 +235,19 @@ def stable_entry_key(item_id: str, link: str, title: str, published: str) -> str
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
-def publication_timestamp(value: str, fallback: int) -> int:
+def parse_publication_timestamp(value: str) -> Optional[int]:
     text = value.strip()
     if not text:
-        return fallback
+        return None
     if re.fullmatch(r"\d+(?:\.\d+)?", text):
         try:
             timestamp = float(text)
             if timestamp > 253402300799:
                 timestamp /= 1000
             result = int(timestamp)
-            return result if 0 < result <= 253402300799 else fallback
+            return result if 0 < result <= 253402300799 else None
         except (ValueError, OverflowError):
-            return fallback
+            return None
     try:
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -255,9 +256,36 @@ def publication_timestamp(value: str, fallback: int) -> int:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         result = int(parsed.timestamp())
-        return result if 0 < result <= 253402300799 else fallback
+        return result if 0 < result <= 253402300799 else None
     except (TypeError, ValueError, OverflowError, OSError):
-        return fallback
+        return None
+
+
+def publication_timestamp(value: str, fallback: int, secondary: str = "") -> int:
+    return (
+        parse_publication_timestamp(value)
+        or parse_publication_timestamp(secondary)
+        or fallback
+    )
+
+
+def preferred_publication_value(values: tuple[object, ...]) -> str:
+    for raw in values:
+        value = str(raw or "").strip()
+        if parse_publication_timestamp(value) is not None:
+            return value
+    return ""
+
+
+def preferred_publication_date(element: ET.Element, names: tuple[str, ...]) -> str:
+    children = list(element)
+    values = tuple(
+        plain_text(element_content(child))
+        for name in names
+        for child in children
+        if local_name(child.tag) == name
+    )
+    return preferred_publication_value(values)
 
 
 def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
@@ -279,7 +307,7 @@ def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
             if not title:
                 continue
             link = str(item.get("url") or item.get("external_url") or "").strip()
-            published = str(item.get("date_published") or item.get("date_modified") or "")
+            published = preferred_publication_value((item.get("date_published"), item.get("date_modified")))
             body = next(
                 (
                     text
@@ -316,7 +344,7 @@ def extract_json_feed(raw: bytes) -> tuple[str, list[dict[str, str]]]:
                 continue
             related_urls = action.get("related_urls") if isinstance(action, dict) else None
             link = str((related_urls[0] if isinstance(related_urls, list) and related_urls else "") or entry.get("id") or "").strip()
-            published = str(metadata.get("pub_date") or entry.get("timestamp") or "")
+            published = preferred_publication_value((metadata.get("pub_date"), entry.get("timestamp")))
             body = plain_text(str(metadata.get("description") or "")) or title
             parsed.append({
                 "key": stable_entry_key(str(entry.get("id") or ""), link, title, published),
@@ -348,12 +376,23 @@ def extract_feed(xml_bytes: bytes) -> tuple[str, list[dict[str, str]]]:
         entries = [node for node in list(item_container) if local_name(node.tag) == "item"]
 
     feed_title = first_child_text(container, {"title"})
+    feed_fallback_date = ""
+    if root_kind != "feed":
+        feed_fallback_date = preferred_publication_date(
+            container,
+            ("pubdate", "lastbuilddate"),
+        )
     parsed: list[dict[str, str]] = []
+    date_priority = (
+        ("published", "pubdate", "date", "updated")
+        if root_kind == "feed"
+        else ("pubdate", "published", "date", "updated")
+    )
     for item in entries[:5000]:
         title = first_child_text(item, {"title"})
         link = feed_link(item)
         item_id = first_child_text(item, {"guid", "id"}).strip()
-        published = first_child_text(item, {"pubdate", "published", "updated", "date"}).strip()
+        published = preferred_publication_date(item, date_priority)
         body = next(
             (
                 value
@@ -365,8 +404,37 @@ def extract_feed(xml_bytes: bytes) -> tuple[str, list[dict[str, str]]]:
         if not title:
             continue
         key = stable_entry_key(item_id, link, title, published)
-        parsed.append({"key": key, "title": title, "body": body, "link": link, "published": published})
+        parsed.append({
+            "key": key,
+            "title": title,
+            "body": body,
+            "link": link,
+            "published": published,
+            "fallback_published": feed_fallback_date,
+        })
     return feed_title, parsed
+
+
+def preview_feed(url: str) -> dict:
+    feed_title, entries = extract_feed(http_request(url, attempts=1))
+    items = []
+    for entry in entries[:MAX_PREVIEW_ITEMS]:
+        item_timestamp = parse_publication_timestamp(entry.get("published", ""))
+        fallback_timestamp = parse_publication_timestamp(entry.get("fallback_published", ""))
+        body = entry["body"]
+        items.append({
+            "title": entry["title"],
+            "body": body[:4000],
+            "body_truncated": len(body) > 4000,
+            "link": safe_article_url(entry.get("link", ""), url),
+            "published_at": item_timestamp or fallback_timestamp,
+            "time_source": "文章时间" if item_timestamp else "频道兜底" if fallback_timestamp else "无发布时间",
+        })
+    return {
+        "feed_title": feed_title,
+        "total": len(entries),
+        "items": items,
+    }
 
 
 class ConfigStore:
@@ -414,8 +482,8 @@ class ConfigStore:
         data["subscriptions"] = subscriptions
         try:
             poll_interval = data.get("poll_interval", self.default_poll_interval)
-            if type(poll_interval) is not int or poll_interval < 10:
-                raise ValueError("逐行扫描间隔必须是至少 10 秒的整数")
+            if type(poll_interval) is not int or poll_interval < 1:
+                raise ValueError("逐行扫描间隔必须是至少 1 秒的整数")
             data["poll_interval"] = poll_interval
             data["newsscope_url"] = validate_http_url(
                 str(data.get("newsscope_url", DEFAULT_NEWSCOPE_URL)), allow_path=False
@@ -472,8 +540,8 @@ class ConfigStore:
             newsscope_url = validate_http_url(str(values["newsscope_url"]), allow_path=False)
         if "poll_interval" in values:
             poll_interval = values["poll_interval"]
-            if type(poll_interval) is not int or poll_interval < 10:
-                raise ValueError("逐行扫描间隔必须是至少 10 秒的整数")
+            if type(poll_interval) is not int or poll_interval < 1:
+                raise ValueError("逐行扫描间隔必须是至少 1 秒的整数")
         if newsscope_url is None and poll_interval is None:
             raise ValueError("没有可保存的配置")
 
@@ -581,7 +649,7 @@ class RuntimeStatus:
             return json.loads(json.dumps(self.values))
 
 
-def http_request(url: str, *, data: Optional[bytes] = None) -> bytes:
+def http_request(url: str, *, data: Optional[bytes] = None, attempts: int = 4) -> bytes:
     headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/feed+json, application/json, application/xml, text/xml, */*"}
     method = "GET"
     if data is not None:
@@ -592,7 +660,8 @@ def http_request(url: str, *, data: Optional[bytes] = None) -> bytes:
     if data is not None:
         SUBMISSION_SLOTS.acquire()
     try:
-        for attempt in range(4):
+        attempt_count = max(1, attempts)
+        for attempt in range(attempt_count):
             try:
                 with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                     body = response.read(MAX_FEED_BYTES + 1)
@@ -602,11 +671,11 @@ def http_request(url: str, *, data: Optional[bytes] = None) -> bytes:
             except HTTPError as exc:
                 detail = exc.read(2048).decode("utf-8", errors="replace").strip()
                 last_error = RuntimeError(f"HTTP {exc.code}: {detail or exc.reason}")
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == attempt_count - 1:
                     break
             except OSError as exc:
                 last_error = RuntimeError(str(exc))
-                if attempt == 3:
+                if attempt == attempt_count - 1:
                     break
             time.sleep(min(2 ** attempt, 8))
     finally:
@@ -682,7 +751,11 @@ def poll_subscription(sub: dict, newscope_url: str, config: Optional[ConfigStore
         articles: list[dict] = []
         keys: list[str] = []
         for entry in pending:
-            published_at = publication_timestamp(entry.get("published", ""), result["checked_at"])
+            published_at = publication_timestamp(
+                entry.get("published", ""),
+                result["checked_at"],
+                entry.get("fallback_published", ""),
+            )
             article = {
                 "source": source,
                 "title": entry["title"],
@@ -917,6 +990,14 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
                 elif self.path == "/api/subscriptions":
                     saved = config.save_subscription(payload)
                     self._json(200, {"ok": True, "subscription": saved})
+                elif self.path == "/api/preview":
+                    url = validate_http_url(str(payload.get("url", "")))
+                    try:
+                        self._json(200, preview_feed(url))
+                    except ValueError as exc:
+                        self._json(422, {"error": f"无法解析订阅内容：{exc}"})
+                    except RuntimeError as exc:
+                        self._json(502, {"error": f"获取订阅失败：{exc}"})
                 else:
                     self._json(404, {"error": "not_found"})
             except ValueError as exc:
@@ -959,7 +1040,7 @@ def main() -> int:
         host = validate_loopback_host(args.host)
     except ValueError as exc:
         parser.error(str(exc))
-    if not (1 <= args.port <= 65535) or args.interval < 10 or not (1 <= args.workers <= 32):
+    if not (1 <= args.port <= 65535) or args.interval < 1 or not (1 <= args.workers <= 32):
         parser.error("端口、轮询间隔或并发数超出有效范围")
 
     try:
