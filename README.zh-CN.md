@@ -76,7 +76,7 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 | `OPENAI_MODEL` | — | 发送给 API 的模型标识。必填。 |
 | `NORMAL_ADDR` | `127.0.0.1:8887` | Normal 查询接口的绑定地址。 |
 | `VIP_ADDR` | `127.0.0.1:8888` | VIP 查询接口的绑定地址。 |
-| `COLLECTOR_PORT` | `8886` | 采集监听端口，绑定到 `127.0.0.1`。 |
+| `COLLECTOR_PORT` | `8886` | 采集监听端口，绑定到容器内所有网络接口。 |
 | `ADMIN_PORT` | `8889` | 管理监听端口，绑定到 `127.0.0.1`。 |
 | `MAX_QUERY_COUNT` | `100` | 单次 `GET /news` 请求允许的位置范围长度上限，也是 `GET /` 返回的 `page_size`。 |
 | `NEWS_CATEGORIES` | 见 [`.env.example`](.env.example) | 必填 JSON 分类数组；每项包含唯一的 `name` 和非空 `description`。模型依据名称和描述分类。 |

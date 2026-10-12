@@ -48,7 +48,7 @@ func run(logger *log.Logger) error {
 	go maintainSQLite(ctx, store, logger)
 	baseContext := func(net.Listener) context.Context { return ctx }
 	servers := []*http.Server{
-		{Addr: "127.0.0.1:" + itoa(cfg.CollectorPort), Handler: api.CollectorHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: time.Duration(cfg.TimeoutSec+10) * time.Second, IdleTimeout: 60 * time.Second},
+		{Addr: "0.0.0.0:" + itoa(cfg.CollectorPort), Handler: api.CollectorHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: time.Duration(cfg.TimeoutSec+10) * time.Second, IdleTimeout: 60 * time.Second},
 		{Addr: cfg.NormalAddr, Handler: api.QueryHandler(storage.AudienceNormal), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
 		{Addr: cfg.VIPAddr, Handler: api.QueryHandler(storage.AudienceVIP), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
 		{Addr: "127.0.0.1:" + itoa(cfg.AdminPort), Handler: api.AdminHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second},

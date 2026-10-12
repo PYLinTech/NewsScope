@@ -15,7 +15,7 @@ USER root
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl python3 redis-server socat supervisor \
+        ca-certificates curl python3 redis-server supervisor \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/newsscope/collector/RSSHub \
         /data/newsscope /data/rsshub /data/redis /usr/share/licenses/RSSHub \
@@ -55,7 +55,7 @@ ENV NODE_ENV=production \
     RSSHUB_POLL_WORKERS=4
 
 WORKDIR /app
-EXPOSE 1200 8885 18886 8887 8888
+EXPOSE 1200 8885 8886 8887 8888
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=8s --start-period=60s --retries=3 \
     CMD ["/usr/local/bin/newsscope-healthcheck"]

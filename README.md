@@ -76,7 +76,7 @@ To package official RSSHub, NewsScope, and the RSSHub adapter plugin into one Do
 | `OPENAI_MODEL` | — | Model identifier sent to the API. Required. |
 | `NORMAL_ADDR` | `127.0.0.1:8887` | Bind address for normal query APIs. |
 | `VIP_ADDR` | `127.0.0.1:8888` | Bind address for VIP query APIs. |
-| `COLLECTOR_PORT` | `8886` | Port for the collector listener, bound to `127.0.0.1`. |
+| `COLLECTOR_PORT` | `8886` | Port for the collector listener, bound to all container interfaces. |
 | `ADMIN_PORT` | `8889` | Port for the admin listener, bound to `127.0.0.1`. |
 | `MAX_QUERY_COUNT` | `100` | Maximum position-range length accepted by one `GET /news` request and the `page_size` reported by `GET /`. |
 | `NEWS_CATEGORIES` | See [`.env.example`](.env.example) | Required JSON array of categories. Each item has a unique `name` and a non-empty `description`; model classification uses both fields. |
