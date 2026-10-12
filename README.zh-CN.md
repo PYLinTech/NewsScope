@@ -62,6 +62,8 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 
 服务从当前工作目录加载 `.env`。若 SQLite 文件所在目录不存在，服务会创建该目录。默认数据库路径为 `./data/newsscope.db`。
 
+文件数据库使用 WAL 模式、5 秒 busy timeout 和 `synchronous=NORMAL`。数据库仍保持一致，但突然断电或系统崩溃后，最近已提交的事务仍可能回滚。NewsScope 启动时会更新 SQLite 查询规划统计信息，运行期间每 24 小时自动执行一次 `PRAGMA optimize` 和被动 WAL 检查点；两次维护之间仍由 SQLite 自动执行 WAL 检查点。
+
 如需将官方 RSSHub、NewsScope 服务和 RSSHub 适配插件打包到单个 Docker 容器，请参阅[单容器部署说明](docker/README.zh-CN.md)。
 
 ## 配置
@@ -76,12 +78,13 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 | `COLLECTOR_PORT` | `8886` | 采集监听端口，绑定到 `127.0.0.1`。 |
 | `ADMIN_PORT` | `8889` | 管理监听端口，绑定到 `127.0.0.1`。 |
 | `MAX_QUERY_COUNT` | `100` | 单次 `GET /news` 请求允许的位置范围长度上限，也是 `GET /` 返回的 `page_size`。 |
-| `NEWS_CATEGORIES` | `时政,科技,财经,文旅,社会,商业,教育,健康,国际` | 模型分析可用的逗号分隔分类列表；分类名称不能重复。 |
+| `NEWS_CATEGORIES` | 见 [`.env.example`](.env.example) | 必填 JSON 分类数组；每项包含唯一的 `name` 和非空 `description`。模型依据名称和描述分类。 |
 | `DATABASE_PATH` | `./data/newsscope.db` | SQLite 数据库文件路径。 |
 | `ANALYSIS_WORKERS` | `3` | 后台分析工作器数量。 |
 | `ANALYSIS_MAX_ATTEMPTS` | `5` | 分析任务被标记失败前的最大尝试次数。 |
 | `ANALYSIS_TIMEOUT_SECONDS` | `45` | 单次模型分析请求的超时时间。 |
-| `ANALYSIS_MAX_BODY_CHARS` | `12000` | 发送给分析模型的正文最大字符数。数据库仍保存采集器提交的完整正文。 |
+| `ANALYSIS_MAX_BODY_CHARS` | `300000` | 发送给分析模型的正文最大字符数。数据库仍保存采集器提交的完整正文。 |
+| `ANALYSIS_MAX_DUPLICATE_DIFF_CHARS` | `30000` | 查重时每篇候选资讯最多发送的独有差异字符数。 |
 | `ANALYSIS_MAX_SUMMARY_CHARS` | `120` | 摘要最大字符数。正文不超过该值时直接将正文作为摘要；超过时由模型总结并限制在该值内。 |
 
 ## 采集器接口
@@ -131,15 +134,15 @@ Normal 和 VIP 是相互独立的受众。提交到一方的资讯不会自动�
 
 ### 服务信息 — `GET /`
 
-返回当前服务时间、单次列表查询的最大范围长度，以及 `all` 和每个预置分类的当前查询最大值：
+返回当前服务时间、单次列表查询的最大范围长度，以及 `all` 和每个分类的名称、描述与当前查询最大值：
 
 ```json
 {
   "current_time": 1791786600,
   "page_size": 100,
   "categories": [
-    {"name": "all", "max_position": 1300},
-    {"name": "科技", "max_position": 210}
+    {"name": "all", "description": "所有分类的资讯", "max_position": 1300},
+    {"name": "科技", "description": "科学研究、技术进展、数字产品及科技产业动态", "max_position": 210}
   ]
 }
 ```

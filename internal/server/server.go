@@ -67,12 +67,30 @@ func (a *API) QueryHandler(audience string) http.Handler {
 }
 
 func (a *API) info(w http.ResponseWriter, r *http.Request, audience string) {
-	maxima, err := a.Store.CategoryMaxima(r.Context(), a.Config.Categories, audience)
+	names := make([]string, 0, len(a.Config.Categories))
+	for _, category := range a.Config.Categories {
+		names = append(names, category.Name)
+	}
+	maxima, err := a.Store.CategoryMaxima(r.Context(), names, audience)
 	if err != nil {
 		a.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"current_time": time.Now().Unix(), "page_size": a.Config.MaxQueryCount, "categories": maxima})
+	descriptions := make(map[string]string, len(a.Config.Categories))
+	for _, category := range a.Config.Categories {
+		descriptions[category.Name] = category.Description
+	}
+	categories := make([]map[string]any, 0, len(maxima))
+	for _, category := range maxima {
+		description := descriptions[category.Name]
+		if category.Name == "all" {
+			description = "所有分类的资讯"
+		}
+		categories = append(categories, map[string]any{
+			"name": category.Name, "description": description, "max_position": category.MaxPosition,
+		})
+	}
+	writeJSON(w, 200, map[string]any{"current_time": time.Now().Unix(), "page_size": a.Config.MaxQueryCount, "categories": categories})
 }
 func (a *API) news(w http.ResponseWriter, r *http.Request, audience string) {
 	q := r.URL.Query()
@@ -352,12 +370,12 @@ func parseInt(s string) (int64, bool) {
 	n, err := strconv.ParseInt(s, 10, 64)
 	return n, err == nil
 }
-func validCategory(got string, categories []string) bool {
+func validCategory(got string, categories []config.Category) bool {
 	if got == "all" {
 		return true
 	}
 	for _, c := range categories {
-		if got == c {
+		if got == c.Name {
 			return true
 		}
 	}

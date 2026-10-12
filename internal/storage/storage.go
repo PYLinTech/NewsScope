@@ -22,6 +22,7 @@ type Store struct {
 	DB      *sql.DB
 	claimMu sync.Mutex
 	jobWake chan struct{}
+	wal     bool
 }
 
 const jobWakeBuffer = 64
@@ -90,6 +91,7 @@ func Open(path string) (*Store, error) {
 		query := fileURL.Query()
 		query.Set("_busy_timeout", "5000")
 		query.Set("_foreign_keys", "1")
+		query.Add("_pragma", "synchronous(NORMAL)")
 		fileURL.RawQuery = query.Encode()
 		dsn = fileURL.String()
 	}
@@ -112,12 +114,34 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(maxConnections)
 	db.SetMaxIdleConns(maxConnections)
-	s := &Store{DB: db, jobWake: make(chan struct{}, jobWakeBuffer)}
+	s := &Store{DB: db, jobWake: make(chan struct{}, jobWakeBuffer), wal: path != ":memory:"}
 	if err := s.initSchema(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	if path != ":memory:" {
+		if _, err := db.Exec("PRAGMA optimize=0x10002"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("optimize SQLite query planner: %w", err)
+		}
+	}
 	return s, nil
+}
+
+// Maintain refreshes planner statistics and passively checkpoints the WAL.
+// SQLite's automatic WAL checkpoint remains enabled as a safety net.
+func (s *Store) Maintain(ctx context.Context) error {
+	if _, err := s.DB.ExecContext(ctx, "PRAGMA optimize"); err != nil {
+		return fmt.Errorf("optimize SQLite query planner: %w", err)
+	}
+	if !s.wal {
+		return nil
+	}
+	var busy, logFrames, checkpointed int
+	if err := s.DB.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("checkpoint SQLite WAL: %w", err)
+	}
+	return nil
 }
 
 func ensureDir(path string) error {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -11,38 +12,45 @@ import (
 )
 
 type Config struct {
-	OpenAIBaseURL   string
-	OpenAIAPIKey    string
-	OpenAIModel     string
-	NormalAddr      string
-	VIPAddr         string
-	CollectorPort   int
-	AdminPort       int
-	MaxQueryCount   int
-	Categories      []string
-	DatabasePath    string
-	Workers         int
-	MaxAttempts     int
-	TimeoutSec      int
-	MaxBodyChars    int
-	MaxSummaryChars int
+	OpenAIBaseURL         string
+	OpenAIAPIKey          string
+	OpenAIModel           string
+	NormalAddr            string
+	VIPAddr               string
+	CollectorPort         int
+	AdminPort             int
+	MaxQueryCount         int
+	Categories            []Category
+	DatabasePath          string
+	Workers               int
+	MaxAttempts           int
+	TimeoutSec            int
+	MaxBodyChars          int
+	MaxDuplicateDiffChars int
+	MaxSummaryChars       int
+}
+
+type Category struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 func Load() (Config, error) {
 	loadDotEnv(".env")
 	c := Config{
-		OpenAIBaseURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), "/"),
-		OpenAIAPIKey:    strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
-		OpenAIModel:     strings.TrimSpace(os.Getenv("OPENAI_MODEL")),
-		NormalAddr:      env("NORMAL_ADDR", "127.0.0.1:8887"),
-		VIPAddr:         env("VIP_ADDR", "127.0.0.1:8888"),
-		MaxQueryCount:   intEnv("MAX_QUERY_COUNT", 100),
-		DatabasePath:    env("DATABASE_PATH", "./data/newsscope.db"),
-		Workers:         intEnv("ANALYSIS_WORKERS", 3),
-		MaxAttempts:     intEnv("ANALYSIS_MAX_ATTEMPTS", 5),
-		TimeoutSec:      intEnv("ANALYSIS_TIMEOUT_SECONDS", 45),
-		MaxBodyChars:    intEnv("ANALYSIS_MAX_BODY_CHARS", 12000),
-		MaxSummaryChars: intEnv("ANALYSIS_MAX_SUMMARY_CHARS", 120),
+		OpenAIBaseURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), "/"),
+		OpenAIAPIKey:          strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		OpenAIModel:           strings.TrimSpace(os.Getenv("OPENAI_MODEL")),
+		NormalAddr:            env("NORMAL_ADDR", "127.0.0.1:8887"),
+		VIPAddr:               env("VIP_ADDR", "127.0.0.1:8888"),
+		MaxQueryCount:         intEnv("MAX_QUERY_COUNT", 100),
+		DatabasePath:          env("DATABASE_PATH", "./data/newsscope.db"),
+		Workers:               intEnv("ANALYSIS_WORKERS", 3),
+		MaxAttempts:           intEnv("ANALYSIS_MAX_ATTEMPTS", 5),
+		TimeoutSec:            intEnv("ANALYSIS_TIMEOUT_SECONDS", 45),
+		MaxBodyChars:          intEnv("ANALYSIS_MAX_BODY_CHARS", 300000),
+		MaxDuplicateDiffChars: intEnv("ANALYSIS_MAX_DUPLICATE_DIFF_CHARS", 30000),
+		MaxSummaryChars:       intEnv("ANALYSIS_MAX_SUMMARY_CHARS", 120),
 	}
 	c.CollectorPort = intEnv("COLLECTOR_PORT", 8886)
 	c.AdminPort = intEnv("ADMIN_PORT", 8889)
@@ -56,8 +64,8 @@ func Load() (Config, error) {
 	if c.MaxQueryCount < 1 || c.MaxQueryCount > 10000 {
 		return c, fmt.Errorf("MAX_QUERY_COUNT must be between 1 and 10000")
 	}
-	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.TimeoutSec > 600 || c.MaxBodyChars < 100 || c.MaxBodyChars > 200000 || c.MaxSummaryChars < 1 || c.MaxSummaryChars > 2000 {
-		return c, fmt.Errorf("analysis worker, retry, timeout, body limit or summary limit configuration is invalid")
+	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.TimeoutSec > 600 || c.MaxDuplicateDiffChars < 1 || c.MaxSummaryChars < 1 || c.MaxSummaryChars > 2000 {
+		return c, fmt.Errorf("analysis worker, retry, timeout, duplicate diff or summary limit configuration is invalid")
 	}
 	for name, addr := range map[string]string{"NORMAL_ADDR": c.NormalAddr, "VIP_ADDR": c.VIPAddr} {
 		_, portText, err := net.SplitHostPort(addr)
@@ -71,19 +79,27 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("%s must be between 1 and 65535", name)
 		}
 	}
-	raw := strings.Split(env("NEWS_CATEGORIES", "时政,科技,财经,文旅,社会,商业,教育,健康,国际"), ",")
-	seen := map[string]bool{"all": true}
-	for _, item := range raw {
-		name := strings.TrimSpace(item)
-		if name == "" || seen[name] {
-			return c, fmt.Errorf("NEWS_CATEGORIES contains an empty or duplicate category")
-		}
-		seen[name] = true
-		c.Categories = append(c.Categories, name)
+	var categories []Category
+	rawCategories := strings.TrimSpace(os.Getenv("NEWS_CATEGORIES"))
+	if rawCategories == "" {
+		return c, fmt.Errorf("NEWS_CATEGORIES is required and must be a JSON array of category objects")
 	}
-	if len(c.Categories) == 0 {
+	if err := json.Unmarshal([]byte(rawCategories), &categories); err != nil {
+		return c, fmt.Errorf("NEWS_CATEGORIES must be a JSON array of category objects: %w", err)
+	}
+	if len(categories) == 0 {
 		return c, fmt.Errorf("NEWS_CATEGORIES must not be empty")
 	}
+	seen := map[string]bool{"all": true}
+	for i := range categories {
+		categories[i].Name = strings.TrimSpace(categories[i].Name)
+		categories[i].Description = strings.TrimSpace(categories[i].Description)
+		if categories[i].Name == "" || categories[i].Description == "" || seen[categories[i].Name] {
+			return c, fmt.Errorf("NEWS_CATEGORIES contains an empty name, empty description or duplicate category")
+		}
+		seen[categories[i].Name] = true
+	}
+	c.Categories = categories
 	if c.DatabasePath == "" {
 		return c, fmt.Errorf("DATABASE_PATH must not be empty")
 	}
@@ -115,8 +131,22 @@ func loadDotEnv(path string) {
 	}
 	defer f.Close()
 	s := bufio.NewScanner(f)
+	var multilineKey string
+	var multilineValue strings.Builder
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
+		if multilineKey != "" {
+			if strings.HasSuffix(line, "'") {
+				multilineValue.WriteString(strings.TrimSuffix(line, "'"))
+				setEnvIfUnset(multilineKey, strings.TrimSpace(multilineValue.String()))
+				multilineKey = ""
+				multilineValue.Reset()
+			} else {
+				multilineValue.WriteString(line)
+				multilineValue.WriteByte('\n')
+			}
+			continue
+		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -125,11 +155,26 @@ func loadDotEnv(path string) {
 			continue
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		value = strings.Trim(value, "\"'")
 		if key != "" {
-			if _, exists := os.LookupEnv(key); !exists {
-				_ = os.Setenv(key, value)
+			if strings.HasPrefix(value, "'") {
+				if len(value) > 1 && strings.HasSuffix(value, "'") {
+					value = value[1 : len(value)-1]
+				} else {
+					multilineKey = key
+					multilineValue.WriteString(strings.TrimPrefix(value, "'"))
+					multilineValue.WriteByte('\n')
+					continue
+				}
+			} else {
+				value = strings.Trim(value, "\"")
 			}
+			setEnvIfUnset(key, value)
 		}
+	}
+}
+
+func setEnvIfUnset(key, value string) {
+	if _, exists := os.LookupEnv(key); !exists {
+		_ = os.Setenv(key, value)
 	}
 }

@@ -62,6 +62,8 @@ Normal and VIP are independent audiences. Ingesting into one does not copy the a
 
 The service loads `.env` from the current working directory. It creates the parent directory for the configured SQLite database when needed. The default database path is `./data/newsscope.db`.
 
+File-backed databases use WAL mode, a 5-second busy timeout, and `synchronous=NORMAL`. This keeps the database consistent while allowing a recent committed transaction to roll back after sudden power loss or a system crash. On startup, NewsScope updates SQLite planner statistics; while running, it runs `PRAGMA optimize` and a passive WAL checkpoint once per day. It relies on SQLite's automatic WAL checkpoint between maintenance runs.
+
 To package official RSSHub, NewsScope, and the RSSHub adapter plugin into one Docker container, see the [single-container deployment guide](docker/README.zh-CN.md).
 
 ## Configuration
@@ -76,12 +78,13 @@ To package official RSSHub, NewsScope, and the RSSHub adapter plugin into one Do
 | `COLLECTOR_PORT` | `8886` | Port for the collector listener, bound to `127.0.0.1`. |
 | `ADMIN_PORT` | `8889` | Port for the admin listener, bound to `127.0.0.1`. |
 | `MAX_QUERY_COUNT` | `100` | Maximum position-range length accepted by one `GET /news` request and the `page_size` reported by `GET /`. |
-| `NEWS_CATEGORIES` | `时政,科技,财经,文旅,社会,商业,教育,健康,国际` | Comma-separated set of categories available to model analysis. Category names must be unique. |
+| `NEWS_CATEGORIES` | See [`.env.example`](.env.example) | Required JSON array of categories. Each item has a unique `name` and a non-empty `description`; model classification uses both fields. |
 | `DATABASE_PATH` | `./data/newsscope.db` | SQLite database file path. |
 | `ANALYSIS_WORKERS` | `3` | Number of background analysis workers. |
 | `ANALYSIS_MAX_ATTEMPTS` | `5` | Maximum analysis attempts before a job is left failed. |
 | `ANALYSIS_TIMEOUT_SECONDS` | `45` | Timeout for one model analysis request. |
-| `ANALYSIS_MAX_BODY_CHARS` | `12000` | Maximum body characters passed to the analysis model. The stored article body remains the submitted content. |
+| `ANALYSIS_MAX_BODY_CHARS` | `300000` | Maximum body characters passed to the analysis model. The stored article body remains the submitted content. |
+| `ANALYSIS_MAX_DUPLICATE_DIFF_CHARS` | `30000` | Maximum candidate-only diff characters sent for each article during duplicate review. |
 | `ANALYSIS_MAX_SUMMARY_CHARS` | `120` | Maximum summary characters. Bodies at or below this length are used verbatim; longer bodies are summarized and capped at this length. |
 
 ## Collector contract
@@ -131,15 +134,15 @@ All timestamps are Unix seconds. The normal and VIP query listeners expose the s
 
 ### Service information — `GET /`
 
-Returns the current server time, the maximum list-query range length, and the current maximum position for `all` and each configured category:
+Returns the current server time, the maximum list-query range length, and the name, description, and current maximum position for `all` and each configured category:
 
 ```json
 {
   "current_time": 1791786600,
   "page_size": 100,
   "categories": [
-    {"name": "all", "max_position": 1300},
-    {"name": "科技", "max_position": 210}
+    {"name": "all", "description": "所有分类的资讯", "max_position": 1300},
+    {"name": "科技", "description": "科学研究、技术进展、数字产品及科技产业动态", "max_position": 210}
   ]
 }
 ```

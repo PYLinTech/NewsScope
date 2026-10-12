@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -11,7 +10,7 @@ import (
 const (
 	similarityWindowSeconds = int64(24 * time.Hour / time.Second)
 	similarityThreshold     = 0.20
-	maxSimilarityCandidates = 5
+	maxSimilarityCandidates = 2
 	titleSimilarityWeight   = 0.30
 	bodySimilarityWeight    = 0.70
 )
@@ -43,30 +42,40 @@ func (s *Store) FindSimilarCandidates(ctx context.Context, in ArticleInput, audi
 	}
 	defer rows.Close()
 
-	candidates := make([]SimilarCandidate, 0)
+	candidates := make([]SimilarCandidate, 0, maxSimilarityCandidates)
 	for rows.Next() {
 		var candidate SimilarCandidate
 		if err := rows.Scan(&candidate.ArticleID, &candidate.Source, &candidate.Title, &candidate.Body, &candidate.CollectedAt); err != nil {
 			return nil, err
 		}
 		candidate.Similarity = articleSimilarityToSets(incomingTitle, incomingBody, candidate.Title, candidate.Body)
-		if candidate.Similarity >= similarityThreshold {
-			candidates = append(candidates, candidate)
+		if candidate.Similarity < similarityThreshold {
+			continue
 		}
+		candidates = insertTopCandidate(candidates, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Similarity == candidates[j].Similarity {
-			return candidates[i].ArticleID > candidates[j].ArticleID
-		}
-		return candidates[i].Similarity > candidates[j].Similarity
-	})
-	if len(candidates) > maxSimilarityCandidates {
-		candidates = candidates[:maxSimilarityCandidates]
-	}
 	return candidates, nil
+}
+
+func insertTopCandidate(top []SimilarCandidate, candidate SimilarCandidate) []SimilarCandidate {
+	index := 0
+	for index < len(top) && (top[index].Similarity > candidate.Similarity ||
+		(top[index].Similarity == candidate.Similarity && top[index].ArticleID > candidate.ArticleID)) {
+		index++
+	}
+	if index >= maxSimilarityCandidates {
+		return top
+	}
+	top = append(top, SimilarCandidate{})
+	copy(top[index+1:], top[index:])
+	top[index] = candidate
+	if len(top) > maxSimilarityCandidates {
+		top = top[:maxSimilarityCandidates]
+	}
+	return top
 }
 
 func articleSimilarityToSets(titleA, bodyA map[string]struct{}, titleB, bodyB string) float64 {

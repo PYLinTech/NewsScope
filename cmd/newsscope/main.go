@@ -39,10 +39,11 @@ func run(logger *log.Logger) error {
 		return err
 	}
 	defer store.DB.Close()
-	model := analyzer.New(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.Categories, cfg.MaxBodyChars, cfg.MaxSummaryChars, cfg.TimeoutSec)
+	model := analyzer.New(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.Categories, cfg.MaxBodyChars, cfg.MaxDuplicateDiffChars, cfg.MaxSummaryChars, cfg.TimeoutSec)
 	api := server.New(store, cfg, logger, model)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	go maintainSQLite(ctx, store, logger)
 	baseContext := func(net.Listener) context.Context { return ctx }
 	servers := []*http.Server{
 		{Addr: "127.0.0.1:" + itoa(cfg.CollectorPort), Handler: api.CollectorHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: time.Duration(cfg.TimeoutSec+10) * time.Second, IdleTimeout: 60 * time.Second},
@@ -85,6 +86,23 @@ func run(logger *log.Logger) error {
 	}
 	workers.Wait()
 	return serverErr
+}
+
+func maintainSQLite(ctx context.Context, store *storage.Store, logger *log.Logger) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			maintenanceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := store.Maintain(maintenanceCtx); err != nil && ctx.Err() == nil {
+				logger.Printf("SQLite maintenance failed: %v", err)
+			}
+			cancel()
+		}
+	}
 }
 
 func worker(ctx context.Context, store *storage.Store, model *analyzer.Client, cfg config.Config, logger *log.Logger) {
