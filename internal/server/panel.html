@@ -1,0 +1,841 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f5f7fa">
+<title>资讯管理 · NewsScope</title>
+<style>
+  /* Design tokens shared with the RSSHub adapter console so both read as one
+     product. --muted and --subtle are darkened from the originals to clear
+     WCAG AA (4.5:1) on every surface they are used on. */
+  :root {
+    color-scheme: light;
+    --page: #f5f7fa;
+    --surface: #ffffff;
+    --surface-muted: #f8fafc;
+    --line: #e3e8ef;
+    --line-strong: #cbd5e1;
+    --ink: #172436;
+    --ink-soft: #3f5065;
+    --muted: #617186;
+    --subtle: #667486;
+    --brand: #2457a6;
+    --brand-hover: #1e4b91;
+    --brand-soft: #edf4ff;
+    --success: #18764c;
+    --success-soft: #eaf7f0;
+    --warning: #9a6100;
+    --warning-soft: #fdf5e7;
+    --danger: #b42318;
+    --danger-hover: #941b13;
+    --danger-soft: #fff0ee;
+    --vip: #7042a2;
+    --vip-soft: #f4effb;
+    --shadow: 0 1px 2px rgb(16 24 40 / 4%), 0 8px 24px rgb(16 24 40 / 4%);
+    --shadow-lg: 0 12px 40px rgb(16 24 40 / 14%);
+    /* One definition drives the header row and every data row, so the two can
+       never drift apart. */
+    --cols: minmax(230px, 2fr) 88px 66px minmax(170px, 1.15fr) 176px;
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { min-width: 320px; margin: 0; color: var(--ink); background: var(--page); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible, dialog:focus-visible {
+    outline: 3px solid rgb(36 87 166 / 28%); outline-offset: 2px;
+  }
+  [hidden] { display: none !important; }
+  .icon { width: 1em; height: 1em; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---- top bar ---- */
+  .topbar { position: sticky; top: 0; z-index: 3; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .topbar-inner, main { width: min(1240px, calc(100% - 48px)); margin-inline: auto; }
+  .topbar-inner { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 62px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; }
+  .brand-mark { display: grid; place-items: center; width: 32px; height: 32px; color: #fff; background: var(--brand); border-radius: 9px; font-size: 18px; }
+  .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -.02em; }
+  .brand-sep { color: var(--line-strong); }
+  .brand-section { color: var(--ink-soft); font-size: 13px; font-weight: 600; }
+  .topbar-meta { display: inline-flex; align-items: center; gap: 14px; color: var(--muted); font-size: 12px; }
+  .status-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-muted); font-size: 12px; font-weight: 600; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status-chip.ok .status-dot { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+  .status-chip.warn .status-dot { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); }
+  .status-chip.bad .status-dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+
+  main { padding: 32px 0 56px; }
+  .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+  .eyebrow { margin: 0 0 6px; color: var(--brand); font-size: 11px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+  h1, h2, h3, p { margin-top: 0; }
+  h1 { margin-bottom: 7px; font-size: clamp(24px, 3vw, 30px); line-height: 1.2; letter-spacing: -.035em; }
+  .lede { max-width: 660px; margin: 0; color: var(--muted); font-size: 14px; }
+  .heading-actions { display: flex; gap: 9px; flex: 0 0 auto; }
+
+  /* ---- buttons ---- */
+  .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 8px 13px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink-soft); font-size: 13px; font-weight: 650; line-height: 1.2; transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease; }
+  .button:hover { border-color: #aab7c7; background: #f8fafc; }
+  .button:active { background: #eef2f7; }
+  .button:disabled { opacity: .55; cursor: not-allowed; }
+  .button-primary { border-color: var(--brand); color: #fff; background: var(--brand); box-shadow: 0 1px 2px rgb(36 87 166 / 18%); }
+  .button-primary:hover { border-color: var(--brand-hover); color: #fff; background: var(--brand-hover); }
+  .button-primary:active { background: #1a4486; }
+  .button-danger { color: var(--danger); border-color: #eabbb6; background: var(--surface); }
+  .button-danger:hover { border-color: #e5a8a2; color: var(--danger-hover); background: var(--danger-soft); }
+  .button-quiet { border-color: transparent; background: transparent; }
+  .button-quiet:hover { border-color: var(--line); background: var(--surface-muted); }
+  .button-sm { min-height: 32px; padding: 5px 10px; font-size: 12px; }
+  .button-icon { width: 34px; min-width: 34px; min-height: 34px; padding: 0; font-size: 17px; }
+
+  /* ---- stat cards ---- */
+  .overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .stat-card { padding: 17px 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+  .stat-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .stat-label { color: var(--muted); font-size: 12px; font-weight: 600; }
+  .stat-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--brand); background: var(--brand-soft); font-size: 17px; }
+  .stat-icon.vip { color: var(--vip); background: var(--vip-soft); }
+  .stat-icon.warn { color: var(--warning); background: var(--warning-soft); }
+  .stat-icon.bad { color: var(--danger); background: var(--danger-soft); }
+  .stat-value { margin: 0; font-size: 27px; font-weight: 720; letter-spacing: -.03em; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .stat-note { margin: 5px 0 0; color: var(--muted); font-size: 11.5px; }
+  .stat-note .dot-sep { color: var(--line-strong); padding: 0 5px; }
+
+  /* ---- panels ---- */
+  .panel { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+  .panel + .panel { margin-top: 18px; }
+  .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 15px 19px; border-bottom: 1px solid var(--line); }
+  .panel-title { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+  .panel-title .icon { color: var(--muted); font-size: 17px; }
+  .panel-description { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+  .panel-body { padding: 18px 19px; }
+  .panel-tools { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+  .freshness { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .filter { min-width: 0; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; font-size: 13px; }
+  .filter::placeholder { color: var(--subtle); }
+  .filter:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+  .count { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-muted); color: var(--ink-soft); font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .badge.normal { border-color: #d7e5fb; color: var(--brand); background: #f3f7fe; }
+  .badge.vip { border-color: #e2d4f1; color: var(--vip); background: var(--vip-soft); }
+  .badge.bad { border-color: #f0cbc7; color: var(--danger); background: var(--danger-soft); }
+  .badge.warn { border-color: #f0dcb4; color: var(--warning); background: var(--warning-soft); }
+  .badge.ok { border-color: #cde8d8; color: var(--success); background: var(--success-soft); }
+
+  /* ---- tables ---- */
+  .row { display: grid; grid-template-columns: var(--cols); align-items: center; column-gap: 16px; padding: 13px 19px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .row-head { display: grid; grid-template-columns: var(--cols); column-gap: 16px; padding: 9px 19px; color: var(--muted); background: var(--surface-muted); border-top: 1px solid var(--line); font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+  .row-head > span { min-width: 0; }
+  .row-head .align-right, .row-actions { justify-content: flex-end; text-align: right; }
+  .cell-title { overflow: hidden; color: var(--ink); font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-source { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .cause { display: inline-block; max-width: 100%; padding: 2px 8px; border-radius: 5px; font: 500 12px/1.5 inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+  .cause.bad { background: var(--danger-soft); color: var(--danger); }
+  .cause.warn { background: var(--warning-soft); color: #8a5a00; }
+  .cause.muted { background: var(--surface-muted); color: var(--muted); }
+  .cell-error { overflow: hidden; color: var(--muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-num { color: var(--ink-soft); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .row-actions { display: flex; gap: 6px; }
+
+  .empty-state { padding: 46px 20px; text-align: center; }
+  .empty-icon { display: grid; place-items: center; width: 48px; height: 48px; margin: 0 auto 12px; border-radius: 12px; color: var(--brand); background: var(--brand-soft); font-size: 23px; }
+  .empty-title { margin: 0 0 5px; font-size: 14px; font-weight: 700; }
+  .empty-copy { max-width: 440px; margin: 0 auto; color: var(--muted); font-size: 12.5px; }
+
+  /* ---- forms ---- */
+  .hide-form { display: grid; grid-template-columns: minmax(180px, .5fr) auto; align-items: end; gap: 12px; max-width: 520px; }
+  .form-hint { grid-column: 1 / -1; margin-top: -3px; }
+  .field { display: grid; gap: 6px; min-width: 0; }
+  .field-label { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
+  .field-hint { color: var(--subtle); font-size: 11px; }
+  .control { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; transition: border-color .15s ease, box-shadow .15s ease; }
+  .control:hover { border-color: #9eacbd; }
+  .control:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px rgb(36 87 166 / 12%); }
+  textarea.control { min-height: 86px; resize: vertical; line-height: 1.6; }
+
+  /* ---- dialog ---- */
+  dialog { width: min(720px, calc(100% - 32px)); max-height: calc(100vh - 64px); padding: 0; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: var(--surface); box-shadow: var(--shadow-lg); }
+  dialog::backdrop { background: rgb(16 24 40 / 38%); }
+  .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 14px; border-bottom: 1px solid var(--line); }
+  .dialog-title { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -.015em; }
+  .dialog-sub { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .dialog-body { display: grid; gap: 16px; padding: 18px 20px; overflow-y: auto; max-height: calc(100vh - 220px); }
+  .dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 9px; padding: 14px 20px; border-top: 1px solid var(--line); background: var(--surface-muted); }
+  .source-block { padding: 13px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); }
+  .source-block dt { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+  .source-block dd { margin: 4px 0 0; color: var(--ink); font-size: 13px; font-weight: 620; }
+  .source-body { max-height: 168px; margin-top: 10px; overflow-y: auto; color: var(--ink-soft); font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .form-grid { display: grid; grid-template-columns: minmax(160px, .8fr) minmax(0, 1.2fr); gap: 14px; }
+  .counter { display: flex; justify-content: space-between; gap: 10px; }
+  .counter .over { color: var(--danger); font-weight: 650; }
+  .segmented { display: flex; gap: 6px; }
+  .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+  .segmented label { flex: 1; padding: 8px 0; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink-soft); background: #fff; font-size: 13px; font-weight: 650; text-align: center; cursor: pointer; transition: all .15s ease; }
+  .segmented label:hover { border-color: #9eacbd; background: #f8fafc; }
+  .segmented input:checked + label { border-color: var(--brand); color: #fff; background: var(--brand); }
+  .segmented input:focus-visible + label { outline: 3px solid rgb(36 87 166 / 28%); outline-offset: 2px; }
+  .form-error { margin: 0; color: var(--danger); font-size: 12px; font-weight: 600; }
+  .form-error:empty { display: none; }
+
+  .toast { position: fixed; right: 22px; bottom: 22px; z-index: 9; display: flex; align-items: center; gap: 9px; max-width: min(440px, calc(100vw - 32px)); padding: 11px 14px; border: 1px solid #cde8d8; border-radius: 8px; color: #155c3c; background: #f0faf4; box-shadow: 0 8px 28px rgb(16 24 40 / 14%); font-size: 12.5px; font-weight: 600; }
+  .toast.error { border-color: #f0cbc7; color: #962b22; background: #fff5f4; }
+  .privacy-note { display: flex; align-items: flex-start; gap: 8px; margin: 18px 2px 0; color: var(--muted); font-size: 11.5px; }
+  .privacy-note .icon { margin-top: 2px; color: var(--success); font-size: 15px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+  @media (max-width: 1080px) {
+    .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    :root { --cols: minmax(190px, 1.8fr) 88px minmax(150px, 1fr); }
+    .row-head > :nth-child(3), .row > :nth-child(3) { display: none; }
+  }
+  @media (max-width: 760px) {
+    .topbar-inner, main { width: calc(100% - 32px); }
+    .brand-section, .brand-sep { display: none; }
+    /* The model name is reference information; health and freshness are not. */
+    #modelText { display: none; }
+    main { padding-top: 24px; }
+    .page-heading { align-items: flex-start; flex-direction: column; gap: 15px; }
+    .heading-actions { width: 100%; }
+    .heading-actions .button { flex: 1; }
+    .row-head { display: none; }
+    :root { --cols: minmax(0, 1fr) auto; }
+    .row { gap: 10px 12px; padding: 14px; }
+    .row > :nth-child(2), .row > :nth-child(3), .row > :nth-child(4) { display: none; }
+    .row-actions { grid-column: 2; grid-row: 1; }
+    .panel-header { flex-direction: column; align-items: stretch; padding: 14px; }
+    .panel-body { padding: 14px; }
+    .hide-form, .form-grid { grid-template-columns: 1fr; }
+    .dialog-body { padding: 15px; }
+    .toast { right: 16px; bottom: 16px; }
+  }
+  @media (max-width: 420px) {
+    .overview { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 12l5-5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-1.6 5.6"/><path d="M20 5v6h-6"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 6.2A9.9 9.9 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.9M6.6 6.7A17 17 0 0 0 3 12s4 6 9 6a9.6 9.6 0 0 0 4-.9"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m6 4 13 8-13 8z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+</defs></svg>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg class="icon" style="color:#fff"><use href="#i-radar"/></svg></span>
+      <span class="brand-name">NewsScope</span>
+      <span class="brand-sep" aria-hidden="true">/</span>
+      <span class="brand-section">资讯管理</span>
+    </div>
+    <div class="topbar-meta">
+      <span class="status-chip ok" id="healthChip"><span class="status-dot" aria-hidden="true"></span><span id="healthText">服务正常</span></span>
+      <span id="modelText"></span>
+      <span class="freshness" id="freshness" aria-live="polite"></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">管理控制台</p>
+      <h1>系统概览与异常处置</h1>
+      <p class="lede">查看资讯语料与分析队列的实时状态，并处置模型无法处理的条目。</p>
+    </div>
+    <div class="heading-actions">
+      <button class="button" type="button" id="refreshButton"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+    </div>
+  </div>
+
+  <section class="overview" aria-label="核心指标">
+    <article class="stat-card">
+      <div class="stat-top"><span class="stat-label">资讯总量</span><span class="stat-icon"><svg class="icon" aria-hidden="true"><use href="#i-doc"/></svg></span></div>
+      <p class="stat-value" id="statArticles">—</p>
+      <p class="stat-note" id="statArticlesNote">普通 —<span class="dot-sep">·</span>VIP —</p>
+    </article>
+    <article class="stat-card">
+      <div class="stat-top"><span class="stat-label">分析失败</span><span class="stat-icon bad"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg></span></div>
+      <p class="stat-value" id="statFailed">—</p>
+      <p class="stat-note">等待重试或人工分析</p>
+    </article>
+    <article class="stat-card">
+      <div class="stat-top"><span class="stat-label">待补审查重</span><span class="stat-icon warn"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></span></div>
+      <p class="stat-value" id="statDedup">—</p>
+      <p class="stat-note">模型不可用时挂起的资讯</p>
+    </article>
+    <article class="stat-card">
+      <div class="stat-top"><span class="stat-label">采集队列</span><span class="stat-icon vip"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg></span></div>
+      <p class="stat-value" id="statQueue">—</p>
+      <p class="stat-note" id="statQueueNote">待处理 —<span class="dot-sep">·</span>处理中 —</p>
+    </article>
+  </section>
+
+  <section class="panel" aria-labelledby="failedTitle">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title" id="failedTitle"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>分析失败名录</h2>
+        <p class="panel-description">模型达到最大尝试次数后停止的资讯。可重新入队，或直接由人工补写分析。</p>
+      </div>
+      <div class="panel-tools">
+        <input class="filter" type="search" id="failedFilter" placeholder="筛选标题或来源" aria-label="在分析失败名录中筛选">
+        <span class="count" id="failedCount"></span>
+        <button class="button button-sm" type="button" id="retryAllButton" disabled><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>全部重试</button>
+      </div>
+    </div>
+    <div data-column-head></div>
+    <div id="failedList"><div class="empty-state"><p class="empty-copy">加载中…</p></div></div>
+  </section>
+
+  <section class="panel" aria-labelledby="dedupTitle">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title" id="dedupTitle"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>待补审查重</h2>
+        <p class="panel-description">模型不可用时挂起的资讯，保存在正式资讯表之外，不占用查询位置。</p>
+      </div>
+      <div class="panel-tools">
+        <input class="filter" type="search" id="dedupFilter" placeholder="筛选标题或来源" aria-label="在待补审查重中筛选">
+        <span class="count" id="dedupCount"></span>
+        <button class="button button-sm" type="button" id="reviewButton" disabled><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>立即补审</button>
+      </div>
+    </div>
+    <div data-column-head></div>
+    <div id="dedupList"><div class="empty-state"><p class="empty-copy">加载中…</p></div></div>
+  </section>
+
+  <section class="panel" aria-labelledby="hideTitle">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title" id="hideTitle"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"/></svg>隐藏资讯</h2>
+        <p class="panel-description">隐藏只更新状态，不删除记录，位置最大值保持不变。</p>
+      </div>
+    </div>
+    <div class="panel-body">
+      <form class="hide-form" id="hideForm">
+        <div class="field">
+          <label class="field-label" for="hideId">资讯 ID</label>
+          <input class="control" id="hideId" name="id" type="number" min="1" step="1" inputmode="numeric" required placeholder="例如 8123">
+        </div>
+        <button class="button button-danger" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"/></svg>隐藏该资讯</button>
+        <span class="field-hint form-hint">在查询接口返回的 items 中可查到 ID</span>
+      </form>
+    </div>
+  </section>
+
+  <p class="privacy-note"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg><span>管理接口无令牌认证，仅绑定本机回环地址。请勿通过端口映射或反向代理暴露到外部网络。</span></p>
+</main>
+
+<dialog id="manualDialog" aria-labelledby="manualTitle">
+  <form id="manualForm">
+    <div class="dialog-header">
+      <div>
+        <h2 class="dialog-title" id="manualTitle">人工补写分析</h2>
+        <p class="dialog-sub" id="manualSub">结果将直接写入正式资讯表</p>
+      </div>
+      <button class="button button-quiet button-icon" type="button" id="manualClose" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="dialog-body">
+      <dl class="source-block">
+        <dt>标题</dt><dd id="manualArticleTitle">—</dd>
+        <dt style="margin-top:10px">正文</dt>
+        <dd class="source-body" id="manualBody">—</dd>
+      </dl>
+      <div class="form-grid">
+        <div class="field">
+          <label class="field-label" for="manualCategory">分类</label>
+          <select class="control" id="manualCategory" required></select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="manualKeywords">关键词</label>
+          <input class="control" id="manualKeywords" required placeholder="以逗号分隔，2 至 6 个">
+          <span class="counter"><span class="field-hint" id="keywordHint">至少 2 个，最多 6 个，每项不超过 40 字</span></span>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="manualSummary">摘要</label>
+        <textarea class="control" id="manualSummary" required></textarea>
+        <span class="counter"><span class="field-hint" id="summaryHint">正文较短时将自动使用正文原文</span><span class="field-hint" id="summaryCounter"></span></span>
+      </div>
+      <div class="field">
+        <span class="field-label">重要性</span>
+        <div class="segmented" role="radiogroup" aria-label="重要性">
+          <input type="radio" name="importance" id="imp1" value="1"><label for="imp1">1</label>
+          <input type="radio" name="importance" id="imp2" value="2"><label for="imp2">2</label>
+          <input type="radio" name="importance" id="imp3" value="3" checked><label for="imp3">3</label>
+          <input type="radio" name="importance" id="imp4" value="4"><label for="imp4">4</label>
+          <input type="radio" name="importance" id="imp5" value="5"><label for="imp5">5</label>
+        </div>
+      </div>
+      <p class="form-error" id="manualError" role="alert"></p>
+    </div>
+    <div class="dialog-footer">
+      <button class="button" type="button" id="manualCancel">取消</button>
+      <button class="button button-primary" type="submit" id="manualSubmit"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>提交分析</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden>
+  <svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="toastText"></span>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var state = {
+    categories: [], summaryMax: 120, dialogArticle: null, dialogOpen: false,
+    manualToken: 0, loadedAt: 0, failed: [], dedup: [], dedupTotal: 0,
+    failedFilter: "", dedupFilter: "",
+  };
+
+  /* ---- freshness ---- */
+  function renderFreshness() {
+    var node = $("freshness");
+    if (!state.loadedAt) { node.textContent = ""; return; }
+    var seconds = Math.max(0, Math.round((Date.now() - state.loadedAt) / 1000));
+    node.textContent = seconds < 3 ? "刚刚更新" : seconds + " 秒前更新";
+  }
+  setInterval(renderFreshness, 1000);
+
+  /* ---- filtering ---- */
+  function matches(item, needle) {
+    if (!needle) return true;
+    return (item.title || "").toLowerCase().indexOf(needle) >= 0 ||
+           (item.source || "").toLowerCase().indexOf(needle) >= 0 ||
+           (item.last_error || "").toLowerCase().indexOf(needle) >= 0;
+  }
+
+  // A raw transport error tells an operator nothing. Name the likely cause so
+  // the roster reads as a to-do list, and keep the original in the tooltip.
+  function explainError(raw) {
+    var text = (raw || "").toLowerCase();
+    if (!text) return { summary: "未记录原因", tone: "muted" };
+    if (text.indexOf("unprocessable") >= 0 || text.indexOf("sensitive") >= 0 || /\b422\b/.test(text)) {
+      return { summary: "模型拒绝该内容，改写后人工提交", tone: "bad" };
+    }
+    if (/\b40[13]\b/.test(text) || text.indexOf("api key") >= 0 || text.indexOf("unauthorized") >= 0) {
+      return { summary: "模型鉴权被拒，请检查密钥", tone: "bad" };
+    }
+    if (text.indexOf("connection refused") >= 0 || text.indexOf("unreachable") >= 0 ||
+        text.indexOf("no such host") >= 0 || text.indexOf("network") >= 0) {
+      return { summary: "模型服务不可达", tone: "bad" };
+    }
+    if (text.indexOf("timeout") >= 0 || text.indexOf("deadline") >= 0) {
+      return { summary: "模型响应超时", tone: "warn" };
+    }
+    if (text.indexOf("too many") >= 0 || text.indexOf("rate") >= 0 || text.indexOf("quota") >= 0) {
+      return { summary: "模型达到速率或额度上限", tone: "warn" };
+    }
+    if (text.indexOf("duplicate review deferred") >= 0) {
+      return { summary: "查重时模型不可用，已挂起", tone: "warn" };
+    }
+    if (text.indexOf("invalid json") >= 0 || text.indexOf("not valid json") >= 0) {
+      return { summary: "模型返回内容无法解析", tone: "warn" };
+    }
+    return { summary: "模型处理失败", tone: "muted" };
+  }
+
+  function escapeHTML(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+  function icon(name) {
+    return '<svg class="icon" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+  }
+  // The header row is generated from this list, which mirrors the CSS --cols
+  // template. Writing it once keeps the labels and their alignment together.
+  var COLUMNS = [
+    { label: "资讯", align: "start" },
+    { label: "受众", align: "start" },
+    { label: "尝试", align: "end" },
+    { label: "最后错误", align: "start" },
+    { label: "操作", align: "end" }
+  ];
+  document.querySelectorAll("[data-column-head]").forEach(function (slot) {
+    slot.outerHTML = '<div class="row-head" aria-hidden="true">' + COLUMNS.map(function (column) {
+      return '<span' + (column.align === "end" ? ' class="align-right"' : "") + ">" + column.label + "</span>";
+    }).join("") + "</div>";
+  });
+
+  function audienceBadge(audience) {
+    var cls = audience === "vip" ? "vip" : "normal";
+    var label = audience === "vip" ? "VIP" : "普通";
+    return '<span class="badge ' + cls + '">' + label + "</span>";
+  }
+  function toast(message, isError) {
+    var el = $("toast");
+    $("toastText").textContent = message;
+    el.classList.toggle("error", !!isError);
+    el.hidden = false;
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(function () { el.hidden = true; }, isError ? 6000 : 3600);
+  }
+  async function api(path, options) {
+    var response = await fetch(path, Object.assign({
+      headers: { "Content-Type": "application/json" }
+    }, options || {}));
+    var text = await response.text();
+    var data = {};
+    if (text) { try { data = JSON.parse(text); } catch (err) { data = {}; } }
+    if (!response.ok) {
+      if (data.error === "review_in_progress") {
+        throw new Error("已有补审任务在执行，请稍候");
+      }
+      throw new Error(data.error || ("请求失败（HTTP " + response.status + "）"));
+    }
+    return data;
+  }
+  function emptyState(iconName, title, copy, action) {
+    return '<div class="empty-state"><div class="empty-icon">' + icon(iconName) +
+      '</div><p class="empty-title">' + escapeHTML(title) + "</p>" +
+      '<p class="empty-copy">' + escapeHTML(copy) + "</p>" +
+      (action || "") + "</div>";
+  }
+
+  /* ---- status ---- */
+  async function loadStatus() {
+    var data = await api("api/status");
+    var normal = { articles: 0 }, vip = { articles: 0 };
+    data.audiences.forEach(function (entry) {
+      if (entry.audience === "vip") { vip = entry; } else { normal = entry; }
+    });
+    $("statArticles").textContent = data.articles;
+    $("statArticlesNote").innerHTML = "普通 " + normal.articles + '<span class="dot-sep">·</span>VIP ' + vip.articles;
+    $("statFailed").textContent = data.analysis_failed;
+    $("statDedup").textContent = data.dedup_pending;
+    $("statQueue").textContent = data.ingest_queue.pending;
+    $("statQueueNote").innerHTML = "待处理 " + data.ingest_queue.pending +
+      '<span class="dot-sep">·</span>处理中 ' + data.ingest_queue.processing;
+
+    $("modelText").textContent = data.model ? "模型 " + data.model : "";
+    // A backlog of deferred duplicates means the model itself is unreachable,
+    // which is a different problem from a handful of rejected articles.
+    var modelDown = data.dedup_pending > 0;
+    var needsWork = modelDown || data.analysis_failed > 0 || data.ingest_queue.pending > 0;
+    var chip = $("healthChip");
+    chip.className = "status-chip " + (modelDown ? "bad" : needsWork ? "warn" : "ok");
+    $("healthText").textContent = modelDown ? "模型不可用"
+      : data.analysis_failed > 0 ? "有分析待处理"
+      : needsWork ? "队列处理中" : "运行正常";
+
+    state.loadedAt = Date.now();
+    renderFreshness();
+
+    state.categories = data.categories || [];
+    state.summaryMax = data.summary_max_chars || state.summaryMax;
+  }
+
+  /* ---- failed list ---- */
+  function renderRows(items, kind, filteredTerm) {
+    var isFailed = kind === "failed";
+    if (!items.length) {
+      // A filtered-to-nothing roster must never read as "everything is fine":
+      // the failures are still there, just hidden by the filter. Only when the
+      // roster is genuinely empty does an active filter mean nothing.
+      if (filteredTerm && (isFailed ? state.failed.length : state.dedup.length) > 0) {
+        return emptyState("doc",
+          "没有匹配「" + escapeHTML(filteredTerm) + "」的条目",
+          "共有 " + (isFailed ? state.failed.length : state.dedup.length) + " 条待处理记录，清除筛选即可查看。",
+          '<button class="button button-sm" type="button" data-clear-filter>清除筛选</button>');
+      }
+      return emptyState("check",
+        kind === "failed" ? "没有分析失败的资讯" : "没有待补审的资讯",
+        kind === "failed"
+          ? "所有资讯都已完成分析。当模型持续失败时，新的失败条目会出现在这里。"
+          : "模型可用时，采集查重失败会自动挂起在这里并在恢复后自动处理。");
+    }
+    return items.map(function (item) {
+      // A pending row has no article id yet: it is not in the corpus, so it can
+      // only be resolved by the review pass, never hidden or hand-analysed.
+      var actions = isFailed
+        ? '<button class="button button-sm button-primary" type="button" data-manual="' + item.article_id + '">人工分析</button>' +
+          '<button class="button button-sm" type="button" data-retry="' + item.article_id + '">重试</button>'
+        : '<span class="cell-source" style="text-align:right">等待补审</span>';
+      var title = escapeHTML(item.title);
+      var source = escapeHTML(item.source);
+      var rawError = escapeHTML(item.last_error);
+      var explained = explainError(item.last_error);
+      return [
+        '<div class="row">',
+          '<div><div class="cell-title" title="', title, '">', title, '</div>',
+          '<div class="cell-source">', source, "</div></div>",
+          "<div>", audienceBadge(item.audience), "</div>",
+          '<div class="cell-num" style="text-align:right">', item.attempts, "</div>",
+          '<div class="cell-error" title="', rawError, '">',
+            '<span class="cause ', explained.tone, '">', escapeHTML(explained.summary), "</span>",
+          "</div>",
+          '<div class="row-actions">', actions, "</div>",
+        "</div>"
+      ].join("");
+    }).join("");
+  }
+
+  // Each roster owns its own render. Keeping these separate means a loader
+  // never depends on the other one having run.
+  function renderFailedList() {
+    $("failedList").innerHTML = renderRows(
+      state.failed.filter(function (item) { return matches(item, state.failedFilter); }),
+      "failed", state.failedFilter);
+    // The count describes the whole roster, not the filtered view, so it always
+    // matches what the bulk action would affect.
+    $("failedCount").textContent = state.failed.length ? state.failed.length + " 条" : "";
+    $("retryAllButton").disabled = state.failed.length === 0;
+  }
+
+  function renderDedupList() {
+    $("dedupList").innerHTML = renderRows(
+      state.dedup.filter(function (item) { return matches(item, state.dedupFilter); }),
+      "dedup", state.dedupFilter);
+    $("dedupCount").textContent = state.dedupTotal ? "共 " + state.dedupTotal + " 条待处理" : "";
+    $("reviewButton").disabled = state.dedup.length === 0;
+  }
+
+  // Typing in either box re-renders both, so 清除筛选 can reset them together.
+  function applyFilters() {
+    renderFailedList();
+    renderDedupList();
+  }
+
+  async function loadFailed() {
+    var data = await api("api/analysis/failed?limit=100");
+    state.failed = data.items || [];
+    renderFailedList();
+    // Read from state rather than a captured array so the bulk action always
+    // matches the count and the rows on screen.
+    $("retryAllButton").onclick = function () {
+      var ids = state.failed.map(function (item) { return item.article_id; });
+      runAction("api/analysis/retry", { article_ids: ids }, "已重新入队 " + ids.length + " 条，等待模型处理");
+    };
+  }
+
+  async function loadDedup() {
+    var data = await api("api/dedup/pending?limit=100");
+    state.dedup = data.items || [];
+    state.dedupTotal = data.total || 0;
+    renderDedupList();
+    $("reviewButton").onclick = function () {
+      runAction("api/dedup/review", {}, null, function (data) {
+        return data.completed
+          ? "补审完成：晋升 " + data.promoted + " 条，丢弃重复 " + data.discarded + " 条"
+          : "模型仍不可用，待审资讯已保留";
+      });
+    };
+  }
+
+  async function runAction(path, body, successMessage, format) {
+    try {
+      var data = await api(path, { method: "POST", body: JSON.stringify(body) });
+      toast(format ? format(data) : successMessage, !!(format && data.completed === false));
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  /* ---- manual analysis ---- */
+  // The server counts runes, so count code points here too; String.length would
+  // over-count anything outside the BMP.
+  function charCount(text) {
+    return Array.from(text || "").length;
+  }
+
+  function parseKeywords(raw) {
+    return raw.split(/[,，、]/).map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+  function updateCounters() {
+    var keywords = parseKeywords($("manualKeywords").value);
+    var hint = $("keywordHint");
+    if (keywords.length < 2 || keywords.length > 6) {
+      hint.textContent = "需要 2 至 6 个关键词，当前 " + keywords.length + " 个";
+      hint.classList.add("over");
+    } else {
+      hint.textContent = keywords.length + " 个关键词";
+      hint.classList.remove("over");
+    }
+    var summary = $("manualSummary").value;
+    var counter = $("summaryCounter");
+    var summaryLength = charCount(summary);
+    counter.textContent = summaryLength + " / " + state.summaryMax;
+    counter.classList.toggle("over", summaryLength > state.summaryMax);
+  }
+
+  function openManual(articleId) {
+    $("manualError").textContent = "";
+    $("manualDialog").showModal();
+    state.dialogOpen = true;
+    // Closing and reopening before the first request settles must not let the
+    // stale response overwrite the dialog the operator is actually looking at.
+    var token = ++state.manualToken;
+    $("manualDialog").setAttribute("aria-busy", "true");
+    api("api/analysis/" + articleId).then(function (data) {
+      if (token !== state.manualToken) { return; }
+      state.dialogArticle = data;
+      $("manualDialog").removeAttribute("aria-busy");
+      $("manualSub").textContent = "资讯 #" + data.article_id + " · " + data.audience + " · 尝试 " + data.attempts + " 次";
+      $("manualArticleTitle").textContent = data.title;
+      $("manualBody").textContent = data.body;
+      var select = $("manualCategory");
+      select.innerHTML = state.categories.map(function (category) {
+        return '<option value="' + escapeHTML(category.name) + '">' + escapeHTML(category.name) + "</option>";
+      }).join("");
+      var current = data.current;
+      $("manualKeywords").value = current && current.keywords ? current.keywords.join("，") : "";
+      $("manualSummary").value = current ? current.summary : "";
+      var importance = current && current.importance ? current.importance : 3;
+      var radio = document.querySelector('input[name="importance"][value="' + importance + '"]');
+      if (radio) { radio.checked = true; }
+      if (data.writable === false) {
+        $("manualError").textContent = "该任务正由工作器处理，暂时无法写入，请稍后重试。";
+        $("manualSubmit").disabled = true;
+      } else {
+        $("manualSubmit").disabled = false;
+      }
+      $("manualKeywords").focus();
+      updateCounters();
+    }).catch(function (err) {
+      if (token !== state.manualToken) { return; }
+      $("manualDialog").removeAttribute("aria-busy");
+      $("manualError").textContent = err.message;
+    });
+  }
+
+  function closeManual() {
+    $("manualDialog").close();
+    state.dialogOpen = false;
+    state.manualToken++;
+    state.dialogArticle = null;
+  }
+
+  $("manualForm").addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!state.dialogArticle) { return; }
+    var keywords = parseKeywords($("manualKeywords").value);
+    var summary = $("manualSummary").value.trim();
+    var body = state.dialogArticle.body || "";
+    // Mirror the server rule so the operator sees the same verdict locally.
+    if (keywords.length < 2 || keywords.length > 6) {
+      $("manualError").textContent = "关键词需要 2 至 6 个。";
+      return;
+    }
+    if (charCount(body) <= state.summaryMax) {
+      summary = body;
+    } else if (!summary) {
+      $("manualError").textContent = "正文长度超过摘要上限，请填写摘要。";
+      return;
+    }
+    $("manualSubmit").disabled = true;
+    api("api/analysis/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        article_id: state.dialogArticle.article_id,
+        category: $("manualCategory").value,
+        keywords: keywords,
+        summary: summary,
+        importance: Number(document.querySelector('input[name="importance"]:checked').value)
+      })
+    }).then(function () {
+      closeManual();
+      toast("分析已保存，资讯恢复可见");
+      return refresh();
+    }).catch(function (err) {
+      $("manualError").textContent = err.message;
+      $("manualSubmit").disabled = false;
+    });
+  });
+
+  ["manualKeywords", "manualSummary"].forEach(function (id) {
+    $(id).addEventListener("input", updateCounters);
+  });
+  $("manualCancel").addEventListener("click", closeManual);
+  $("manualClose").addEventListener("click", closeManual);
+  $("manualDialog").addEventListener("cancel", function () {
+    state.dialogOpen = false;
+    state.manualToken++;
+    state.dialogArticle = null;
+  });
+
+  /* ---- delegation ---- */
+  document.addEventListener("click", function (event) {
+    var target = event.target.closest("[data-manual],[data-retry],[data-hide]");
+    if (!target) { return; }
+    if (target.dataset.manual) {
+      openManual(target.dataset.manual);
+    } else if (target.dataset.retry) {
+      runAction("api/analysis/retry", { article_ids: [Number(target.dataset.retry)] }, "已重新入队，等待模型处理");
+    } else if (target.dataset.hide) {
+      if (!window.confirm("确认隐藏资讯 #" + target.dataset.hide + "？该操作不删除记录。")) { return; }
+      runAction("api/hide", { id: Number(target.dataset.hide) }, "资讯已隐藏");
+    }
+  });
+
+  $("hideForm").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var id = Number($("hideId").value);
+    if (!id || id < 1) { return; }
+    runAction("api/hide", { id: id }, "资讯 #" + id + " 已隐藏");
+    $("hideId").value = "";
+  });
+
+  /* ---- refresh loop ---- */
+  var refreshing = false;
+  function bindFilter(id, key) {
+    var input = $(id);
+    input.addEventListener("input", function () {
+      state[key] = input.value.trim().toLowerCase();
+      applyFilters();
+    });
+  }
+
+  async function refresh() {
+    if (refreshing) { return; }
+    refreshing = true;
+    try {
+      await Promise.all([loadStatus(), loadFailed(), loadDedup()]);
+    } catch (err) {
+      toast("加载失败：" + err.message, true);
+    } finally {
+      refreshing = false;
+    }
+  }
+  $("refreshButton").addEventListener("click", function () {
+    refresh();
+    toast("已刷新");
+  });
+  document.addEventListener("click", function (event) {
+    var trigger = event.target.closest("[data-clear-filter]");
+    if (!trigger) { return; }
+    $("failedFilter").value = "";
+    $("dedupFilter").value = "";
+    state.failedFilter = "";
+    state.dedupFilter = "";
+    applyFilters();
+  });
+  bindFilter("failedFilter", "failedFilter");
+  bindFilter("dedupFilter", "dedupFilter");
+
+  refresh();
+  setInterval(function () { if (!state.dialogOpen && document.visibilityState === "visible") { refresh(); } }, 15000);
+})();
+</script>
+</body>
+</html>

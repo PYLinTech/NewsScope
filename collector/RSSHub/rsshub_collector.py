@@ -37,8 +37,7 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 
-DEFAULT_PANEL_HOST = "127.0.0.1"
-DEFAULT_PANEL_PORT = 8885
+DEFAULT_PANEL_ADDR = "127.0.0.1:8885"
 DEFAULT_NEWSCOPE_URL = "http://127.0.0.1:8886"
 DEFAULT_TIMEZONE_NAME = "Asia/Shanghai"
 DEFAULT_TIMEZONE = ZoneInfo(DEFAULT_TIMEZONE_NAME)
@@ -136,6 +135,20 @@ def validate_loopback_host(host: str) -> str:
         raise ValueError("RSSHub 适配插件只能绑定本机回环地址")
     return value
 
+
+def validate_panel_address(addr: str) -> tuple[str, int]:
+    """Split and validate a host:port panel bind address.
+
+    Like the NewsScope listeners, the panel is configured as one address so the
+    bind target can never drift between a host and a port value.
+    """
+    value = addr.strip()
+    host, separator, port_text = value.rpartition(":")
+    if not separator or not host:
+        raise ValueError("RSSHub 适配插件监听地址必须是 host:port，例如 127.0.0.1:8885")
+    if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+        raise ValueError("RSSHub 适配插件端口超出有效范围")
+    return validate_loopback_host(host), int(port_text)
 
 class TextOnlyHTML(HTMLParser):
     def __init__(self) -> None:
@@ -494,9 +507,15 @@ def preview_feed(url: str) -> dict:
 
 
 class ConfigStore:
-    def __init__(self, path: Path, default_poll_interval: int = DEFAULT_INTERVAL) -> None:
+    def __init__(
+        self,
+        path: Path,
+        default_poll_interval: int = DEFAULT_INTERVAL,
+        default_newsscope_url: str = DEFAULT_NEWSCOPE_URL,
+    ) -> None:
         self.path = path
         self.default_poll_interval = default_poll_interval
+        self.default_newsscope_url = default_newsscope_url
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.target_lock = ReadWriteLock()
@@ -515,7 +534,7 @@ class ConfigStore:
 
     def _default(self) -> dict:
         return {
-            "newsscope_url": DEFAULT_NEWSCOPE_URL,
+            "newsscope_url": self.default_newsscope_url,
             "poll_interval": self.default_poll_interval,
             "subscriptions": [],
         }
@@ -1086,30 +1105,35 @@ def make_handler(config: ConfigStore, status: RuntimeStatus, html_path: Path):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="RSSHub adapter for NewsScope")
-    parser.add_argument("--host", default=os.environ.get("RSSHUB_PANEL_HOST", DEFAULT_PANEL_HOST), help="监听地址；容器模式支持 0.0.0.0")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("RSSHUB_PANEL_PORT", DEFAULT_PANEL_PORT)), help="适配插件端口，默认 8885")
+    parser.add_argument("--addr", default=os.environ.get("RSSHUB_PANEL_ADDR", DEFAULT_PANEL_ADDR), help="监听地址 host:port，容器模式支持 0.0.0.0")
     parser.add_argument("--interval", type=int, default=int(os.environ.get("RSSHUB_POLL_INTERVAL", DEFAULT_INTERVAL)), help="启动下一个订阅检查的间隔秒数，默认 10")
     parser.add_argument("--workers", type=int, default=int(os.environ.get("RSSHUB_POLL_WORKERS", DEFAULT_WORKERS)), help="并发订阅数，默认 4")
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("RSSHUB_CONFIG", default_config_path())), help="配置文件路径")
+    parser.add_argument(
+        "--newsscope",
+        default=os.environ.get("RSSHUB_NEWSCOPE_URL", DEFAULT_NEWSCOPE_URL),
+        help="首次运行时写入的 NewsScope 地址，之后以面板保存的值为准",
+    )
     args = parser.parse_args()
     try:
-        host = validate_loopback_host(args.host)
+        host, port = validate_panel_address(args.addr)
+        newsscope_url = validate_http_url(args.newsscope, allow_path=False)
     except ValueError as exc:
         parser.error(str(exc))
-    if not (1 <= args.port <= 65535) or args.interval < 1 or not (1 <= args.workers <= 32):
-        parser.error("端口、轮询间隔或并发数超出有效范围")
+    if args.interval < 10 or not (1 <= args.workers <= 32):
+        parser.error("轮询间隔或并发数超出有效范围")
 
     try:
-        config = ConfigStore(args.config.expanduser(), args.interval)
+        config = ConfigStore(args.config.expanduser(), args.interval, newsscope_url)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 2
     status = RuntimeStatus()
     poller = Poller(config, status, args.workers)
-    server = ThreadingHTTPServer((host, args.port), make_handler(config, status, Path(__file__).with_name("index.html")))
+    server = ThreadingHTTPServer((host, port), make_handler(config, status, Path(__file__).with_name("index.html")))
     server.daemon_threads = True
     poller.start()
-    print(f"RSSHub 适配插件：http://{host}:{args.port}")
+    print(f"RSSHub 适配插件：http://{host}:{port}")
     print(f"配置文件：{args.config.expanduser()}")
     try:
         server.serve_forever(poll_interval=0.5)

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -45,13 +44,13 @@ func run(logger *log.Logger) error {
 	api := server.New(store, cfg, logger, model)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	go maintainSQLite(ctx, store, logger)
+	go maintainSQLite(ctx, store, logger, cfg)
 	baseContext := func(net.Listener) context.Context { return ctx }
 	servers := []*http.Server{
-		{Addr: "0.0.0.0:" + itoa(cfg.CollectorPort), Handler: api.CollectorHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: time.Duration(cfg.TimeoutSec+10) * time.Second, IdleTimeout: 60 * time.Second},
+		{Addr: cfg.CollectorAddr, Handler: api.CollectorHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: time.Duration(cfg.TimeoutSec+10) * time.Second, IdleTimeout: 60 * time.Second},
 		{Addr: cfg.NormalAddr, Handler: api.QueryHandler(storage.AudienceNormal), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
 		{Addr: cfg.VIPAddr, Handler: api.QueryHandler(storage.AudienceVIP), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second},
-		{Addr: "127.0.0.1:" + itoa(cfg.AdminPort), Handler: api.AdminHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second},
+		{Addr: cfg.AdminAddr, Handler: api.AdminHandler(), BaseContext: baseContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second},
 	}
 	errCh := make(chan error, len(servers))
 	for _, srv := range servers {
@@ -79,6 +78,11 @@ func run(logger *log.Logger) error {
 			worker(ctx, store, model, cfg, logger)
 		}()
 	}
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		idleMaintenanceWorker(ctx, api, logger, cfg)
+	}()
 	var serverErr error
 	select {
 	case <-ctx.Done():
@@ -139,8 +143,13 @@ func ingestWorker(ctx context.Context, store *storage.Store, api *server.API, lo
 			}
 			continue
 		}
-		if result.Status == "rejected" {
+		switch result.Status {
+		case "rejected":
 			logger.Printf("ingestion job %d was rejected after queueing: %s", job.ID, result.Reason)
+		case "deferred":
+			// The server already logs why review could not run; this line adds
+			// the queue id so the event can be correlated with the pending table.
+			logger.Printf("ingestion job %d deferred to duplicate review as pending %d", job.ID, result.ArticleID)
 		}
 	}
 }
@@ -153,7 +162,26 @@ func releaseIngestOnShutdown(store *storage.Store, job storage.IngestJob, logger
 	}
 }
 
-func maintainSQLite(ctx context.Context, store *storage.Store, logger *log.Logger) {
+func maintainSQLite(ctx context.Context, store *storage.Store, logger *log.Logger, cfg config.Config) {
+	run := func() {
+		maintenanceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := store.Maintain(maintenanceCtx); err != nil && ctx.Err() == nil {
+			logger.Printf("SQLite maintenance failed: %v", err)
+		}
+		if trimmed, err := store.TrimOldBodies(maintenanceCtx,
+			time.Duration(cfg.BodyRetentionDays)*24*time.Hour, cfg.BodyRetentionChars); err != nil && ctx.Err() == nil {
+			logger.Printf("body retention failed: %v", err)
+		} else if trimmed > 0 {
+			logger.Printf("trimmed the stored body of %d old articles to %d characters", trimmed, cfg.BodyRetentionChars)
+		}
+		if pruned, err := store.PruneCompletedIngest(maintenanceCtx, 24*time.Hour); err != nil && ctx.Err() == nil {
+			logger.Printf("ingest queue pruning failed: %v", err)
+		} else if pruned > 0 {
+			logger.Printf("pruned %d completed ingest queue rows", pruned)
+		}
+	}
+	run()
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -161,11 +189,7 @@ func maintainSQLite(ctx context.Context, store *storage.Store, logger *log.Logge
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			maintenanceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			if err := store.Maintain(maintenanceCtx); err != nil && ctx.Err() == nil {
-				logger.Printf("SQLite maintenance failed: %v", err)
-			}
-			cancel()
+			run()
 		}
 	}
 }
@@ -218,6 +242,90 @@ func worker(ctx context.Context, store *storage.Store, model *analyzer.Client, c
 	}
 }
 
+// idleMaintenanceWorker runs idle maintenance, skipping the pass entirely while
+// the collector is still delivering. When a pass makes no progress the gap
+// between attempts widens, so a backlog that cannot be cleared stops costing
+// model calls.
+func idleMaintenanceWorker(ctx context.Context, api *server.API, logger *log.Logger, cfg config.Config) {
+	quietFor := time.Duration(cfg.IdleRetryInterval) * time.Second
+	cap := time.Duration(cfg.IdleRetryMaxBackoff) * time.Second
+	backoff := time.Duration(0)
+
+	for {
+		if !sleepUnlessDone(ctx, 0) {
+			return
+		}
+		passCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		report, err := api.IdleMaintenance(passCtx, quietFor, cfg.IdleRetryBatch)
+		cancel()
+
+		var delay time.Duration
+		switch {
+		case ctx.Err() != nil:
+			return
+		case !report.Idle:
+			// Busy: wait for the stream to fall quiet again. This is the path
+			// that keeps a busy period from spending the model budget on retries.
+			backoff = 0
+			delay = quietFor
+		case err != nil:
+			// Progressively widen the gap so an endpoint that cannot help is
+			// probed less and less often instead of continuously.
+			backoff = nextBackoff(backoff, quietFor, cap)
+			logger.Printf("idle maintenance could not progress (after %s): %v", backoff, err)
+			delay = backoff
+		case report.Promoted+report.Discarded+report.Requeued > 0:
+			// Real progress: keep draining while there is more to do.
+			backoff = 0
+			delay = 0
+			continue
+		default:
+			// Nothing outstanding and nothing wrong: idle cheaply.
+			backoff = 0
+			delay = quietFor
+		}
+		if !sleepUnlessDone(ctx, delay) {
+			return
+		}
+	}
+}
+
+// nextBackoff doubles the current gap, starting from the idle interval.
+func nextBackoff(current, base, cap time.Duration) time.Duration {
+	if current <= 0 {
+		return base
+	}
+	if current >= cap {
+		return cap
+	}
+	next := current * 2
+	if next > cap {
+		return cap
+	}
+	return next
+}
+
+// sleepUnlessDone waits for the delay and reports whether the worker should
+// keep running. A zero delay means "immediately".
+func sleepUnlessDone(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func releaseOnShutdown(store *storage.Store, job storage.Job, logger *log.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -234,4 +342,3 @@ func wait(ctx context.Context, d time.Duration) {
 	case <-timer.C:
 	}
 }
-func itoa(n int) string { return strconv.Itoa(n) }

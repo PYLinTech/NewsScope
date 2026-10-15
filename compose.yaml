@@ -1,41 +1,138 @@
+# NewsScope deployment stack.
+#
+#   docker compose up -d                     NewsScope only (recommended start)
+#   docker compose --profile rsshub up -d     NewsScope + RSSHub + Redis + collector
+#
+# Every runtime setting is read from .env. After editing .env run `up -d` again:
+# it recreates the containers from the existing image, so configuration changes
+# never require `docker compose build`.
+name: newsscope
+
 services:
+  # ---- core: NewsScope service only -------------------------------------
   newsscope:
-    image: newsscope-rsshub:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    image: newsscope:local
     build:
       context: .
       args:
-        RSSHUB_IMAGE: ${RSSHUB_IMAGE:-ghcr.io/diygod/rsshub:chromium-bundled-d55daa06c1340db6fa9cc5f865f627748eb5b346}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
-    restart: unless-stopped
-    init: true
-    env_file:
-      - .env
     environment:
-      PORT: "1200"
-      CACHE_TYPE: redis
-      CACHE_EXPIRE: ${RSSHUB_CACHE_EXPIRE:-300}
-      CACHE_CONTENT_EXPIRE: ${RSSHUB_CONTENT_CACHE_EXPIRE:-3600}
-      RSSHUB_REDIS_MAXMEMORY: ${RSSHUB_REDIS_MAXMEMORY:-256mb}
-      REDIS_URL: redis://127.0.0.1:6379/
-      NORMAL_ADDR: 0.0.0.0:8887
-      VIP_ADDR: 0.0.0.0:8888
-      DATABASE_PATH: /data/newsscope/newsscope.db
-      XDG_CONFIG_HOME: /data/config
-      RSSHUB_CONFIG: /data/rsshub/config.json
-      RSSHUB_PANEL_HOST: 0.0.0.0
-      RSSHUB_PANEL_PORT: "8885"
-      RSSHUB_PANEL_CONTAINER_MODE: "1"
-      RSSHUB_POLL_INTERVAL: ${RSSHUB_POLL_INTERVAL:-10}
-      RSSHUB_POLL_WORKERS: ${RSSHUB_POLL_WORKERS:-4}
+      TZ: ${TZ:-Asia/Shanghai}
+      # ${VAR:-default} keeps these container-side while a key in .env still wins.
+      DATABASE_PATH: ${DATABASE_PATH:-/data/newsscope/newsscope.db}
+      COLLECTOR_ADDR: ${COLLECTOR_ADDR:-0.0.0.0:8886}
+      NORMAL_ADDR: ${NORMAL_ADDR:-0.0.0.0:8887}
+      VIP_ADDR: ${VIP_ADDR:-0.0.0.0:8888}
+      # Loopback: the admin API has no token, so reach it with `compose exec`.
+      ADMIN_ADDR: ${ADMIN_ADDR:-127.0.0.1:8889}
     ports:
-      - "${RSSHUB_BIND:-127.0.0.1}:${RSSHUB_PORT:-1200}:1200"
-      - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8885}:8885"
+      # Left-hand side is host-side publishing; the container target stays fixed
+      # at the default ADDR ports. Widening the port inside COLLECTOR_ADDR also
+      # means editing the matching target here.
       - "${COLLECTOR_BIND:-127.0.0.1}:${COLLECTOR_HOST_PORT:-8886}:8886"
       - "${NORMAL_BIND:-127.0.0.1}:${NORMAL_HOST_PORT:-8887}:8887"
       - "${VIP_BIND:-127.0.0.1}:${VIP_HOST_PORT:-8888}:8888"
     volumes:
       - newsscope-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/newsscope-healthcheck"]
+      interval: 30s
+      timeout: 8s
+      start_period: 20s
+      retries: 3
     stop_grace_period: 45s
+
+  # ---- optional group: RSSHub + Redis + collector plugin ------------------
+  # RSSHub renders routes with Chromium, so this group needs roughly 2 GiB of
+  # RAM. Skipping it costs nothing: any external collector can POST to /ingest
+  # instead, and the collector plugin can feed from any RSS/Atom URL.
+  redis:
+    profiles: [rsshub]
+    restart: unless-stopped
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --save
+      - "60 1"
+      - --maxmemory
+      - ${RSSHUB_REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - rsshub-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  rsshub:
+    profiles: [rsshub]
+    restart: unless-stopped
+    image: ${RSSHUB_IMAGE:-ghcr.io/diygod/rsshub:chromium-bundled-d55daa06c1340db6fa9cc5f865f627748eb5b346}
+    environment:
+      NODE_ENV: production
+      TZ: ${TZ:-Asia/Shanghai}
+      PORT: "1200"
+      LISTEN_INADDR_ANY: "1"
+      CACHE_TYPE: redis
+      CACHE_EXPIRE: ${RSSHUB_CACHE_EXPIRE:-300}
+      CACHE_CONTENT_EXPIRE: ${RSSHUB_CONTENT_CACHE_EXPIRE:-3600}
+      REDIS_URL: redis://redis:6379/
+      RSSHUB_REDIS_MAXMEMORY: ${RSSHUB_REDIS_MAXMEMORY:-256mb}
+      XDG_CONFIG_HOME: /data/config
+      RSSHUB_CONFIG: /data/rsshub/config.json
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${RSSHUB_BIND:-127.0.0.1}:${RSSHUB_HOST_PORT:-1200}:1200"
+    volumes:
+      - rsshub-config:/data
+    # The Chromium bundle starts slowly on a cold run, so the grace period both
+    # before and after startup is generous.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:1200/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    stop_grace_period: 45s
+
+  # Runs from the core image so the plugin and the service cannot drift apart.
+  rsshub-adapter:
+    profiles: [rsshub]
+    restart: unless-stopped
+    image: newsscope:local
+    entrypoint: ["python3", "/opt/newsscope/collector/RSSHub/rsshub_collector.py"]
+    environment:
+      RSSHUB_PANEL_ADDR: ${RSSHUB_PANEL_ADDR:-0.0.0.0:8885}
+      RSSHUB_PANEL_CONTAINER_MODE: "1"
+      RSSHUB_CONFIG: /data/config/newsscope-rsshub/config.json
+      # Seeds the panel on first run only; anything saved in the panel wins.
+      RSSHUB_NEWSCOPE_URL: http://newsscope:8886
+      RSSHUB_POLL_INTERVAL: ${RSSHUB_POLL_INTERVAL:-10}
+      RSSHUB_POLL_WORKERS: ${RSSHUB_POLL_WORKERS:-4}
+    depends_on:
+      newsscope:
+        condition: service_healthy
+    ports:
+      - "${PANEL_BIND:-127.0.0.1}:${PANEL_HOST_PORT:-8885}:8885"
+    volumes:
+      - newsscope-data:/data
+    # The bundled healthcheck follows RSSHUB_PANEL_ADDR, which is set only on
+    # this container, so it probes the panel instead of the query listeners.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/newsscope-healthcheck"]
+      interval: 30s
+      timeout: 8s
+      start_period: 10s
+      retries: 3
 
 volumes:
   newsscope-data:
+  rsshub-redis:
+  rsshub-config:

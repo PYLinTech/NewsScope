@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,8 +95,8 @@ func TestIngestRejectsMillisecondCollectionTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "rejected" || result.Reason != "invalid_article" {
-		t.Fatalf("result=%+v; want millisecond timestamp rejected", result)
+	if result.Status != "rejected" || result.Reason != RejectTimeNotSecond {
+		t.Fatalf("result=%+v; want a millisecond timestamp named as such", result)
 	}
 }
 
@@ -109,7 +110,7 @@ func TestFindSimilarCandidatesUsesRecentRawArticlesInSameAudience(t *testing.T) 
 
 	first := ArticleInput{
 		Source: "城市日报", Title: "市政府公布城市更新计划",
-		Body: "市政府今日公布城市更新计划，将改造老旧社区并新增公共服务设施。相关部门表示，项目将分阶段推进。",
+		Body:        "市政府今日公布城市更新计划，将改造老旧社区并新增公共服务设施。相关部门表示，项目将分阶段推进。",
 		CollectedAt: time.Now().Unix(),
 	}
 	if result, err := store.Ingest(ctx, first, AudienceNormal); err != nil || result.Status != "accepted" {
@@ -118,7 +119,7 @@ func TestFindSimilarCandidatesUsesRecentRawArticlesInSameAudience(t *testing.T) 
 
 	incoming := ArticleInput{
 		Source: "本地新闻", Title: "老旧社区改造与服务设施建设启动",
-		Body: "市政府今日公布城市更新计划，改造老旧社区并新增公共服务设施。有关部门称项目会分阶段推进。",
+		Body:        "市政府今日公布城市更新计划，改造老旧社区并新增公共服务设施。有关部门称项目会分阶段推进。",
 		CollectedAt: time.Now().Unix(),
 	}
 	candidates, err := store.FindSimilarCandidates(ctx, incoming, AudienceNormal)
@@ -146,5 +147,135 @@ func TestFindSimilarCandidatesUsesRecentRawArticlesInSameAudience(t *testing.T) 
 	}
 	if len(candidates) != 0 {
 		t.Fatalf("expired candidates=%+v; want none older than 24 hours", candidates)
+	}
+}
+
+// Retention is opt-in: with the default zero age nothing may be touched.
+func TestTrimOldBodiesIsDisabledByDefault(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB.Close()
+	long := strings.Repeat("正文内容", 200)
+	for i := 0; i < 3; i++ {
+		if _, err := store.Ingest(context.Background(), ArticleInput{
+			Source: "来源", Title: "资讯", Body: long, CollectedAt: time.Now().Add(-time.Hour * 48).Unix(),
+		}, AudienceNormal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trimmed, err := store.TrimOldBodies(context.Background(), 0, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmed != 0 {
+		t.Fatalf("trimmed=%d; retention must be off by default", trimmed)
+	}
+	var bodies []string
+	rows, err := store.QueryDB.Query(`SELECT body FROM articles`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+	}
+	for _, body := range bodies {
+		if body != long {
+			t.Fatalf("a body was trimmed while retention is off: %d chars", len([]rune(body)))
+		}
+	}
+}
+
+// Trimming must bound growth without renumbering anything.
+func TestTrimOldBodiesKeepsPositionsIntact(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB.Close()
+	long := strings.Repeat("正文内容", 200)
+	for i := 0; i < 3; i++ {
+		if _, err := store.Ingest(context.Background(), ArticleInput{
+			Source: "来源", Title: "资讯", Body: long,
+			CollectedAt: time.Now().Add(-time.Hour * 48).Unix(),
+		}, AudienceNormal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.MaxPosition(context.Background(), "all", AudienceNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed, err := store.TrimOldBodies(context.Background(), 24*time.Hour, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmed != 3 {
+		t.Fatalf("trimmed=%d; want 3", trimmed)
+	}
+	after, err := store.MaxPosition(context.Background(), "all", AudienceNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("max position moved from %d to %d; cursors would break", before, after)
+	}
+	var rows int
+	if err := store.QueryDB.QueryRow(`SELECT COUNT(*) FROM articles`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 3 {
+		t.Fatalf("got %d articles after trimming; articles must never be deleted", rows)
+	}
+	var title, body string
+	if err := store.QueryDB.QueryRow(`SELECT title,body FROM articles ORDER BY id LIMIT 1`).Scan(&title, &body); err != nil {
+		t.Fatal(err)
+	}
+	if title != "资讯" {
+		t.Fatalf("title changed to %q", title)
+	}
+	if got := len([]rune(body)); got != 11 {
+		t.Fatalf("body is %d runes; want 10 kept plus the marker", got)
+	}
+}
+
+func TestPruneCompletedIngestKeepsUnfinishedRows(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB.Close()
+	if _, err := store.EnqueueIngestBatch(context.Background(), []ArticleInput{
+		{Source: "来源", Title: "标题", Body: "正文", CollectedAt: time.Now().Unix()},
+	}, AudienceNormal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`UPDATE ingest_queue SET status='completed',body=NULL,updated_at=?`, time.Now().Unix()-7200); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueIngestBatch(context.Background(), []ArticleInput{
+		{Source: "来源", Title: "第二篇", Body: "正文", CollectedAt: time.Now().Unix()},
+	}, AudienceNormal); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := store.PruneCompletedIngest(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned=%d; want 1", pruned)
+	}
+	var pending int
+	if err := store.QueryDB.QueryRow(`SELECT COUNT(*) FROM ingest_queue WHERE status='pending'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending rows=%d; unprocessed work must survive", pending)
 	}
 }

@@ -17,8 +17,8 @@ type Config struct {
 	OpenAIModel           string
 	NormalAddr            string
 	VIPAddr               string
-	CollectorPort         int
-	AdminPort             int
+	CollectorAddr         string
+	AdminAddr             string
 	MaxQueryCount         int
 	Categories            []Category
 	DatabasePath          string
@@ -28,6 +28,11 @@ type Config struct {
 	MaxBodyChars          int
 	MaxDuplicateDiffChars int
 	MaxSummaryChars       int
+	IdleRetryInterval     int
+	IdleRetryMaxBackoff   int
+	IdleRetryBatch        int
+	BodyRetentionDays     int
+	BodyRetentionChars    int
 }
 
 type Category struct {
@@ -51,9 +56,23 @@ func Load() (Config, error) {
 		MaxBodyChars:          intEnv("ANALYSIS_MAX_BODY_CHARS", 300000),
 		MaxDuplicateDiffChars: intEnv("ANALYSIS_MAX_DUPLICATE_DIFF_CHARS", 30000),
 		MaxSummaryChars:       intEnv("ANALYSIS_MAX_SUMMARY_CHARS", 120),
+		IdleRetryInterval:     intEnv("IDLE_RETRY_INTERVAL_SECONDS", 300),
+		IdleRetryMaxBackoff:   intEnv("IDLE_RETRY_MAX_BACKOFF_SECONDS", 1800),
+		IdleRetryBatch:        intEnv("IDLE_RETRY_BATCH", 20),
+		BodyRetentionDays:     intEnv("BODY_RETENTION_DAYS", 0),
+		BodyRetentionChars:    intEnv("BODY_RETENTION_CHARS", 400),
 	}
-	c.CollectorPort = intEnv("COLLECTOR_PORT", 8886)
-	c.AdminPort = intEnv("ADMIN_PORT", 8889)
+	// Every listener is configured as a full host:port address. The collector
+	// and admin listeners keep a loopback-only default so a plain host run never
+	// exposes them; containers set 0.0.0.0 to publish a port directly.
+	c.CollectorAddr = env("COLLECTOR_ADDR", "127.0.0.1:8886")
+	c.AdminAddr = env("ADMIN_ADDR", "127.0.0.1:8889")
+	if err := rejectPortOnlyListener("COLLECTOR_PORT", "COLLECTOR_ADDR", c.CollectorAddr); err != nil {
+		return c, err
+	}
+	if err := rejectPortOnlyListener("ADMIN_PORT", "ADMIN_ADDR", c.AdminAddr); err != nil {
+		return c, err
+	}
 	if c.OpenAIBaseURL == "" || c.OpenAIAPIKey == "" || c.OpenAIModel == "" {
 		return c, fmt.Errorf("OPENAI_BASE_URL, OPENAI_API_KEY and OPENAI_MODEL are required")
 	}
@@ -67,16 +86,31 @@ func Load() (Config, error) {
 	if c.Workers < 1 || c.Workers > 32 || c.MaxAttempts < 1 || c.MaxAttempts > 20 || c.TimeoutSec < 1 || c.MaxDuplicateDiffChars < 1 || c.MaxSummaryChars < 1 || c.MaxSummaryChars > 2000 {
 		return c, fmt.Errorf("analysis worker, retry, timeout, duplicate diff or summary limit configuration is invalid")
 	}
-	for name, addr := range map[string]string{"NORMAL_ADDR": c.NormalAddr, "VIP_ADDR": c.VIPAddr} {
-		_, portText, err := net.SplitHostPort(addr)
+	if c.IdleRetryInterval < 10 || c.IdleRetryInterval > 86400 {
+		return c, fmt.Errorf("IDLE_RETRY_INTERVAL_SECONDS must be between 10 and 86400")
+	}
+	if c.IdleRetryMaxBackoff < c.IdleRetryInterval || c.IdleRetryMaxBackoff > 86400 {
+		return c, fmt.Errorf("IDLE_RETRY_MAX_BACKOFF_SECONDS must be between IDLE_RETRY_INTERVAL_SECONDS and 86400")
+	}
+	if c.IdleRetryBatch < 1 || c.IdleRetryBatch > 500 {
+		return c, fmt.Errorf("IDLE_RETRY_BATCH must be between 1 and 500")
+	}
+	if c.BodyRetentionDays < 0 || c.BodyRetentionDays > 3650 {
+		return c, fmt.Errorf("BODY_RETENTION_DAYS must be between 0 and 3650")
+	}
+	if c.BodyRetentionChars < 0 || c.BodyRetentionChars > 100000 {
+		return c, fmt.Errorf("BODY_RETENTION_CHARS must be between 0 and 100000")
+	}
+	for _, listener := range []struct{ Name, Addr string }{
+		{"NORMAL_ADDR", c.NormalAddr},
+		{"VIP_ADDR", c.VIPAddr},
+		{"COLLECTOR_ADDR", c.CollectorAddr},
+		{"ADMIN_ADDR", c.AdminAddr},
+	} {
+		_, portText, err := net.SplitHostPort(listener.Addr)
 		port, portErr := strconv.Atoi(portText)
 		if err != nil || portErr != nil || port < 1 || port > 65535 {
-			return c, fmt.Errorf("%s must be host:port", name)
-		}
-	}
-	for name, port := range map[string]int{"COLLECTOR_PORT": c.CollectorPort, "ADMIN_PORT": c.AdminPort} {
-		if port < 1 || port > 65535 {
-			return c, fmt.Errorf("%s must be between 1 and 65535", name)
+			return c, fmt.Errorf("%s must be host:port", listener.Name)
 		}
 	}
 	var categories []Category
@@ -111,6 +145,21 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// rejectPortOnlyListener turns a retired port-only setting into an actionable
+// error. Listeners are configured as host:port now, so silently ignoring the
+// old variable would pin the service to an unexpected port.
+func rejectPortOnlyListener(oldKey, addrKey, addr string) error {
+	port := strings.TrimSpace(os.Getenv(oldKey))
+	if port == "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = "127.0.0.1"
+	}
+	return fmt.Errorf("%s is no longer supported; remove it or set %s=%s:%s instead", oldKey, addrKey, host, port)
 }
 func intEnv(key string, fallback int) int {
 	v := strings.TrimSpace(os.Getenv(key))

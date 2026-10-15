@@ -100,11 +100,18 @@ func (c *Client) Analyze(ctx context.Context, title, body string) (Result, error
 	if len(out.Keywords) < 2 || len(out.Keywords) > 6 {
 		return Result{}, fmt.Errorf("model returned invalid keywords")
 	}
+	// Normalise as we validate, so a padded keyword is stored trimmed and the
+	// length limit applies to what actually reaches the corpus. The manual
+	// analysis path normalises the same way.
+	keywords := make([]string, 0, len(out.Keywords))
 	for _, word := range out.Keywords {
-		if strings.TrimSpace(word) == "" || utf8.RuneCountInString(word) > 40 {
+		trimmed := strings.TrimSpace(word)
+		if trimmed == "" || utf8.RuneCountInString(trimmed) > 40 {
 			return Result{}, fmt.Errorf("model returned invalid keyword")
 		}
+		keywords = append(keywords, trimmed)
 	}
+	out.Keywords = keywords
 	if useOriginalSummary {
 		out.Summary = summarySource
 		return out, nil

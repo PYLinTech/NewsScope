@@ -48,7 +48,7 @@ func (s *Store) FindSimilarCandidates(ctx context.Context, in ArticleInput, audi
 		if err := rows.Scan(&candidate.ArticleID, &candidate.Source, &candidate.Title, &candidate.Body, &candidate.CollectedAt); err != nil {
 			return nil, err
 		}
-		candidate.Similarity = articleSimilarityToSets(incomingTitle, incomingBody, candidate.Title, candidate.Body)
+		candidate.Similarity = articleSimilarity(incomingTitle, incomingBody, candidate.Title, candidate.Body)
 		if candidate.Similarity < similarityThreshold {
 			continue
 		}
@@ -78,40 +78,71 @@ func insertTopCandidate(top []SimilarCandidate, candidate SimilarCandidate) []Si
 	return top
 }
 
-func articleSimilarityToSets(titleA, bodyA map[string]struct{}, titleB, bodyB string) float64 {
-	titleScore := shingleJaccard(titleA, textShingles(titleB))
-	bodyScore := shingleJaccard(bodyA, textShingles(bodyB))
+func articleSimilarity(titleSet, bodySet map[string]struct{}, title, body string) float64 {
+	titleScore := shingleJaccard(titleSet, textShingles(title))
+	bodyScore := shingleJaccard(bodySet, textShingles(body))
 	return titleSimilarityWeight*titleScore + bodySimilarityWeight*bodyScore
 }
 
+// textShingles tokenises text and returns its shingle set: whole tokens for
+// non-CJK runs, overlapping character bigrams for CJK, which is how Chinese
+// text has no word boundaries.
+//
+// The scan works on byte offsets in the original string. CJK bigrams are then
+// substrings of that string, so building a set costs no per-bigram allocation —
+// which matters because this runs once per candidate article per submission.
 func textShingles(text string) map[string]struct{} {
 	text = strings.ToLower(text)
-	tokens := strings.FieldsFunc(text, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
-	})
 	out := make(map[string]struct{})
-	for _, token := range tokens {
-		runes := []rune(token)
-		containsCJK := false
-		for _, r := range runes {
-			if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
-				containsCJK = true
-				break
+	start := -1
+	for i, r := range text {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			if start < 0 {
+				start = i
 			}
-		}
-		if !containsCJK {
-			out[token] = struct{}{}
 			continue
 		}
-		if len(runes) == 1 {
-			out[token] = struct{}{}
-			continue
-		}
-		for i := 0; i+1 < len(runes); i++ {
-			out[string(runes[i:i+2])] = struct{}{}
+		if start >= 0 {
+			addTokenShingles(out, text[start:i])
+			start = -1
 		}
 	}
+	if start >= 0 {
+		addTokenShingles(out, text[start:])
+	}
 	return out
+}
+
+func addTokenShingles(out map[string]struct{}, token string) {
+	if !containsCJK(token) {
+		out[token] = struct{}{}
+		return
+	}
+	// A two-rune shingle spans from one rune's start to the start of the rune
+	// after it, so the loop keeps a two-step lookbehind: `first` is where the
+	// shingle begins and `second` is the offset the shingle ends at.
+	first, second := -1, -1
+	for offset := range token {
+		if first >= 0 {
+			out[token[first:offset]] = struct{}{}
+		}
+		first, second = second, offset
+	}
+	if first >= 0 {
+		out[token[first:len(token)]] = struct{}{}
+		return
+	}
+	// A single-rune token has no bigram to emit; keep the character itself.
+	out[token] = struct{}{}
+}
+
+func containsCJK(token string) bool {
+	for _, r := range token {
+		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
+			return true
+		}
+	}
+	return false
 }
 
 func shingleJaccard(a, b map[string]struct{}) float64 {
